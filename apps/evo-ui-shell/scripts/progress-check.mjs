@@ -1,0 +1,13 @@
+import http from "node:http"; import { readFileSync, existsSync } from "node:fs"; import { extname, join, normalize } from "node:path"; import { chromium } from "playwright-core";
+const DIST=process.argv[2]; const MIME={".html":"text/html",".js":"text/javascript",".css":"text/css",".woff2":"font/woff2",".svg":"image/svg+xml",".json":"application/json"};
+const s=http.createServer((q,r)=>{const p=decodeURIComponent((q.url||"/").split("?")[0]);let f=join(DIST,normalize(p));if(!existsSync(f)||p==="/")f=join(DIST,"index.html");try{r.writeHead(200,{"content-type":MIME[extname(f)]||"application/octet-stream"});r.end(readFileSync(f));}catch{r.writeHead(404);r.end("x");}});
+await new Promise(r=>s.listen(0,"127.0.0.1",r)); const base=`http://127.0.0.1:${s.address().port}/`;
+const b=await chromium.launch({headless:true,args:["--no-sandbox"]}); const pg=await b.newPage({viewport:{width:1280,height:900}});
+await pg.goto(base+"?designer=1&mock=1",{waitUntil:"networkidle",timeout:15000}); await pg.waitForTimeout(900);
+const pk=pg.locator(".designer-picker"); await pg.getByText("Change",{exact:false}).first().click().catch(()=>{}); await pg.waitForTimeout(400);
+await pk.getByText("480x272",{exact:false}).first().click().catch(()=>{}); await pg.waitForTimeout(300);
+await pk.getByText("4.3in",{exact:false}).first().click().catch(()=>{}); await pg.waitForTimeout(700);
+await pg.getByText("Portrait",{exact:true}).first().click().catch(()=>{}); await pg.waitForTimeout(600);
+await pg.locator('.designer-device-screen button[aria-label="Now playing"]').click().catch(()=>{}); await pg.waitForTimeout(500);
+const out=await pg.evaluate(()=>{const root=document.querySelector(".designer-device-screen");const W=Math.round(root.getBoundingClientRect().width);const baseL=root.getBoundingClientRect().left;const pr=document.querySelector(".designer-device-screen .playback-progress");const kids=[...(pr?.children||[])].map(k=>{const r=k.getBoundingClientRect();return{cls:(k.className||"").toString().slice(0,24),leftInPanel:Math.round(r.left-baseL),rightEdge:Math.round(W-(r.right-baseL)),text:(k.textContent||"").slice(0,6)};});return{panelW:W,overflowsX:pr?pr.scrollWidth>pr.clientWidth+1:null,kids};});
+console.log(JSON.stringify(out,null,2)); await b.close(); s.close();

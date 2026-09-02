@@ -1,0 +1,10 @@
+import http from "node:http"; import { readFileSync, existsSync } from "node:fs"; import { extname, join, normalize } from "node:path"; import { chromium } from "playwright-core";
+const DIST=process.argv[2]; const MIME={".html":"text/html",".js":"text/javascript",".css":"text/css",".woff2":"font/woff2",".svg":"image/svg+xml",".json":"application/json"};
+const s=http.createServer((q,r)=>{const p=decodeURIComponent((q.url||"/").split("?")[0]);let f=join(DIST,normalize(p));if(!existsSync(f)||p==="/")f=join(DIST,"index.html");try{r.writeHead(200,{"content-type":MIME[extname(f)]||"application/octet-stream"});r.end(readFileSync(f));}catch{r.writeHead(404);r.end("x");}});
+await new Promise(r=>s.listen(0,"127.0.0.1",r)); const base=`http://127.0.0.1:${s.address().port}/`;
+const b=await chromium.launch({headless:true,args:["--no-sandbox"]}); const pg=await b.newPage({viewport:{width:1280,height:800}});
+await pg.addInitScript(()=>{try{localStorage.setItem("evo-ui-shell.theme","air");}catch{}});
+await pg.goto(base+"?designer=1&mock=1",{waitUntil:"networkidle",timeout:15000}); await pg.waitForTimeout(1200);
+const out=await pg.evaluate(()=>{const g=(s)=>{const e=document.querySelector(s);return e?{cls:(e.className||"").toString().match(/theme-[a-z-]+/g)||[],bg:getComputedStyle(e).backgroundColor}:null;};
+  return {html:(document.documentElement.className.match(/theme-[a-z-]+/g)||[]),workshop:g(".designer-workshop"),appShell:g(".designer-device-screen .app-shell"),previewBg:(()=>{const e=document.querySelector(".designer-device-screen .app-shell");return e?getComputedStyle(e).getPropertyValue("--background").trim():null;})()};});
+console.log(JSON.stringify(out,null,2)); await b.close(); s.close();

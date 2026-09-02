@@ -1,0 +1,31 @@
+{
+  "name": "@evo/ui-shell",
+  "version": "0.1.13",
+  "private": true,
+  "description": "evo UI shell scaffold for gateway bootstrap delivery.",
+  "type": "module",
+  "scripts": {
+    "preinstall": "node scripts/check-node-lts.mjs",
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "contracts:test": "node --experimental-strip-types --experimental-specifier-resolution=node --test tests/contracts/**/*.test.ts",
+    "test:display": "node --experimental-strip-types --experimental-specifier-resolution=node --test tests/contracts/presentation-target.test.ts tests/contracts/display-preset-catalog.test.ts tests/contracts/display-test-matrix.test.ts tests/contracts/ui-profile.test.ts",
+    "evidence:chunk02": "node scripts/chunk02-evidence.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@preact/signals": "^2.0.4",
+    "lucide-preact": "^1.14.0",
+    "preact": "^10.26.6",
+    "qrcode-generator": "^2.0.4"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.2",
+    "@types/node": "^24.6.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.7"
+  }
+}

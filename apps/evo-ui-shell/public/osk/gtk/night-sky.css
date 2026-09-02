@@ -1,0 +1,28 @@
+/* Evo on-screen keyboard theme: night-sky
+ * GENERATED from the .theme-night-sky tokens in src/styles.css (oklch -> sRGB hex).
+ * DO NOT EDIT BY HAND - run: node scripts/gen-osk-themes.mjs
+ * squeekboard reads this via the kiosk user's ~/.config/gtk-3.0/gtk.css. */
+
+window,
+.keyboard {
+  background-color: #01010b;
+}
+
+button {
+  background-color: #050926;
+  color: #ebedfc;
+  border: 1px solid #232955;
+}
+
+button:active,
+button:checked {
+  background-color: #b37bff;
+  color: #040411;
+}
+
+button.special,
+button.altline,
+button.wide {
+  background-color: #b37bff;
+  color: #040411;
+}

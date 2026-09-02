@@ -1,0 +1,38 @@
+[package]
+name = "evo-ui-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "UI runtime service: serves the operator UI shell on http://<device>/ and reverse-proxies framework HTTP + WebSocket traffic to the framework's loopback HTTPS substrate. The operator's browser never sees a TLS cert."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Catalogue-derived capability projection: parse
+# /opt/evo/catalogue/default.toml at boot to derive which
+# shelf-backed UI capabilities to advertise, so a new plugin
+# admitting a shelf yields its capability without a source edit.
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "io-util", "time", "fs", "signal"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio", "http1", "client-legacy"] }
+http-body-util = "0.1"
+bytes = "1"
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+# SHA-256 fingerprint of the device-CA bundle, logged (first 8 hex)
+# on every hot-reload so the transition is greppable on the target.
+sha2 = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "evo-ui-runtime"
+path = "src/main.rs"
+
+[dev-dependencies]
+# Catalogue-parser unit tests write throw-away TOML files.
+tempfile = "3"

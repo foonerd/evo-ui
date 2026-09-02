@@ -1,0 +1,36 @@
+[Unit]
+Description=Evo UI Runtime Service
+# The runtime serves the operator UI on loopback + LAN and reverse-
+# proxies the framework on 127.0.0.1. It needs the network STACK
+# (loopback, up at basic.target), NOT network-online.target. Waiting on
+# network-online cost ~8.5s (NetworkManager-wait-online) at boot and
+# pushed the kiosk's first paint out to ~13s, leaving a long blank gap
+# after the Plymouth splash. Order after the framework it proxies so the
+# first upstream request has a target, but do NOT Requires it: the
+# runtime serves static + health and reconnects if the framework is slow
+# (honest "connecting" surface beats a blocked boot).
+After=evo.service
+Wants=evo.service
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+Environment=EVO_UI_RUNTIME_ROOT=/opt/evo/ui
+Environment=EVO_UI_HTTP_PORT=80
+Environment=EVO_UI_HTTPS_PORT=443
+ExecStart=/opt/evo/bin/evo-ui-runtime
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/evo/ui/data /opt/evo/ui/logs
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+StandardOutput=append:/opt/evo/ui/logs/runtime.log
+StandardError=append:/opt/evo/ui/logs/runtime.log
+
+[Install]
+WantedBy=multi-user.target

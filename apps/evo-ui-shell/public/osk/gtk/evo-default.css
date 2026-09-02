@@ -1,0 +1,28 @@
+/* Evo on-screen keyboard theme: evo-default
+ * GENERATED from the .theme-evo-default tokens in src/styles.css (oklch -> sRGB hex).
+ * DO NOT EDIT BY HAND - run: node scripts/gen-osk-themes.mjs
+ * squeekboard reads this via the kiosk user's ~/.config/gtk-3.0/gtk.css. */
+
+window,
+.keyboard {
+  background-color: #000208;
+}
+
+button {
+  background-color: #000e21;
+  color: #e8f0f3;
+  border: 1px solid #102239;
+}
+
+button:active,
+button:checked {
+  background-color: #00cfd1;
+  color: #000208;
+}
+
+button.special,
+button.altline,
+button.wide {
+  background-color: #00cfd1;
+  color: #000208;
+}

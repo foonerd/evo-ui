@@ -1,0 +1,28 @@
+/* Evo on-screen keyboard theme: sunrise
+ * GENERATED from the .theme-sunrise tokens in src/styles.css (oklch -> sRGB hex).
+ * DO NOT EDIT BY HAND - run: node scripts/gen-osk-themes.mjs
+ * squeekboard reads this via the kiosk user's ~/.config/gtk-3.0/gtk.css. */
+
+window,
+.keyboard {
+  background-color: #100703;
+}
+
+button {
+  background-color: #26160f;
+  color: #f9ece1;
+  border: 1px solid #442d21;
+}
+
+button:active,
+button:checked {
+  background-color: #eb8656;
+  color: #1d0d07;
+}
+
+button.special,
+button.altline,
+button.wide {
+  background-color: #eb8656;
+  color: #1d0d07;
+}
