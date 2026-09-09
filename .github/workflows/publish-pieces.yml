@@ -1,0 +1,187 @@
+# Mint evo-ui-shell and evo-ui-runtime into foonerd/evo-device-audio-artefacts.
+# Same commons key as audio. Append-only. Pieces first; audio bake composes.
+name: publish-pieces
+
+"on":
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "What to mint"
+        type: choice
+        options: [all, ui-shell, ui-runtime]
+        default: all
+
+concurrency:
+  group: publish-pieces
+  cancel-in-progress: false
+
+env:
+  ARTEFACTS_REPO: foonerd/evo-device-audio-artefacts
+  COMMIT_USER: evo-ui CI
+  COMMIT_EMAIL: ci@evoframework.org
+  RUST_TOOLCHAIN: "1.85"
+
+jobs:
+  build-ui-shell:
+    if: inputs.scope == 'all' || inputs.scope == 'ui-shell'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Build SPA
+        run: |
+          set -euo pipefail
+          cd apps/evo-ui-shell
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          npm run build
+          test -d dist
+
+      - name: Pack and sign evo-ui-shell
+        env:
+          PLUGIN_SIGNING_KEY_PEM: ${{ secrets.PLUGIN_SIGNING_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          VERSION=$(awk -F'"' '/"version":/{print $4; exit}' apps/evo-ui-shell/package.json)
+          umask 077
+          printenv PLUGIN_SIGNING_KEY_PEM > /tmp/key.pem
+          export EVO_PLUGIN_SIGNING_KEY=/tmp/key.pem
+          OUT=/tmp/stage/bundles/evo-ui-shell/${VERSION}
+          mkdir -p "$OUT"
+          bash scripts/release/pack-signed-tree.sh \
+            --piece evo-ui-shell --version "$VERSION" --kind ui-shell \
+            --src apps/evo-ui-shell/dist --out-dir "$OUT"
+          shred -u /tmp/key.pem
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ui-shell
+          path: /tmp/stage/bundles/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-ui-runtime:
+    if: inputs.scope == 'all' || inputs.scope == 'ui-runtime'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Cross-build evo-ui-runtime
+        run: |
+          set -euo pipefail
+          cd apps/evo-ui-runtime
+          cross build --release --target ${{ matrix.target }}
+
+      - name: Sign runtime
+        env:
+          PLUGIN_SIGNING_KEY_PEM: ${{ secrets.PLUGIN_SIGNING_KEY_PEM }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          VERSION=$(awk -F'"' '/^version =/{print $2; exit}' apps/evo-ui-runtime/Cargo.toml)
+          umask 077
+          printenv PLUGIN_SIGNING_KEY_PEM > /tmp/key.pem
+          STAGE=/tmp/stage/binaries/evo-ui-runtime/${VERSION}/${TARGET}
+          mkdir -p "$STAGE"
+          src="apps/evo-ui-runtime/target/${TARGET}/release/evo-ui-runtime"
+          cp "$src" "$STAGE/evo-ui-runtime"
+          chmod 755 "$STAGE/evo-ui-runtime"
+          openssl pkeyutl -sign -inkey /tmp/key.pem -rawin \
+            -in "$STAGE/evo-ui-runtime" -out "$STAGE/evo-ui-runtime.sig"
+          sha256sum "$STAGE/evo-ui-runtime" | awk '{print $1}' > "$STAGE/evo-ui-runtime.sha256"
+          cp apps/evo-ui-runtime/scripts/device/evo-ui.service.in "$STAGE/evo-ui.service.in"
+          {
+            echo "schema_version = 0"
+            echo "kind = \"ui-runtime\""
+            echo "piece = \"evo-ui-runtime\""
+            echo "version = \"${VERSION}\""
+            echo "target = \"${TARGET}\""
+            echo "built_at = \"$(date -u +%FT%TZ)\""
+            echo "publisher = \"org.evoframework\""
+            echo "git_rev = \"$(git rev-parse HEAD)\""
+          } > "$STAGE/build-info.toml"
+          openssl pkeyutl -sign -inkey /tmp/key.pem -rawin \
+            -in "$STAGE/build-info.toml" -out "$STAGE/build-info.sig"
+          shred -u /tmp/key.pem
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ui-runtime-${{ matrix.target }}
+          path: /tmp/stage/binaries/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [build-ui-shell, build-ui-runtime]
+    if: |
+      always() &&
+      (needs.build-ui-shell.result == 'success' || needs.build-ui-shell.result == 'skipped') &&
+      (needs.build-ui-runtime.result == 'success' || needs.build-ui-runtime.result == 'skipped') &&
+      (needs.build-ui-shell.result == 'success' || needs.build-ui-runtime.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        if: needs.build-ui-shell.result == 'success'
+        with:
+          pattern: ui-shell
+          path: /tmp/stage/bundles/
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v8
+        if: needs.build-ui-runtime.result == 'success'
+        with:
+          pattern: ui-runtime-*
+          path: /tmp/stage/binaries/
+          merge-multiple: true
+
+      - name: Push append-only slots
+        env:
+          GH_TOKEN: ${{ secrets.ARTEFACTS_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "${COMMIT_USER}"
+          git config --global user.email "${COMMIT_EMAIL}"
+          ART=/tmp/artefacts
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${ARTEFACTS_REPO}.git" "$ART"
+          cd "$ART"
+          NEW=()
+          for root in binaries bundles; do
+            [ -d /tmp/stage/$root ] || continue
+            while IFS= read -r -d '' src; do
+              rel="${src#/tmp/stage/}"
+              dest="$ART/$rel"
+              if [ -e "$dest" ]; then
+                echo "::warning::Skipping $rel — version slot already published"
+                continue
+              fi
+              mkdir -p "$(dirname "$dest")"
+              cp -a "$src" "$dest"
+              NEW+=("$rel")
+            done < <(find /tmp/stage/$root -type f -print0)
+          done
+          if [ ${#NEW[@]} -eq 0 ]; then
+            echo "No new pieces to publish."
+            exit 0
+          fi
+          git add binaries/ bundles/ || true
+          git commit -m "publish: evo-ui pieces (${{ inputs.scope }})"
+          git push origin main

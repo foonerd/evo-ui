@@ -1,6 +1,6 @@
 [package]
 name = "evo-ui-runtime"
-version = "0.1.0"
+version = "0.1.13"
 edition = "2024"
 description = "UI runtime service: serves the operator UI shell on http://<device>/ and reverse-proxies framework HTTP + WebSocket traffic to the framework's loopback HTTPS substrate. The operator's browser never sees a TLS cert."
 
