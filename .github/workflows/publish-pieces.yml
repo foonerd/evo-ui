@@ -45,6 +45,10 @@ jobs:
           PLUGIN_SIGNING_KEY_PEM: ${{ secrets.PLUGIN_SIGNING_KEY_PEM }}
         run: |
           set -euo pipefail
+          if [ -z "${PLUGIN_SIGNING_KEY_PEM:-}" ]; then
+            echo "::error::PLUGIN_SIGNING_KEY_PEM is empty — set the audio commons key on this repo (same secret as foonerd/evo-device-audio)"
+            exit 1
+          fi
           VERSION=$(awk -F'"' '/"version":/{print $4; exit}' apps/evo-ui-shell/package.json)
           umask 077
           printenv PLUGIN_SIGNING_KEY_PEM > /tmp/key.pem
@@ -97,6 +101,10 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
+          if [ -z "${PLUGIN_SIGNING_KEY_PEM:-}" ]; then
+            echo "::error::PLUGIN_SIGNING_KEY_PEM is empty — set the audio commons key on this repo (same secret as foonerd/evo-device-audio)"
+            exit 1
+          fi
           VERSION=$(awk -F'"' '/^version =/{print $2; exit}' apps/evo-ui-runtime/Cargo.toml)
           umask 077
           printenv PLUGIN_SIGNING_KEY_PEM > /tmp/key.pem
