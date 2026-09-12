@@ -14,6 +14,7 @@ import {
   protectedGroupIds,
   surfaceEntryLocked,
   firstPaintStep,
+  householdWriteSocket,
   HOUSEHOLD_HAPPENING_TYPE
 } from "../../src/features/household/household-protection.ts";
 
@@ -297,6 +298,13 @@ test("firstPaintStep: chosen -> neither step, browser or glass", () => {
     firstPaintStep({ ready: true, snapshot: chosen, hasBearer: true, isGlass: true }),
     "none"
   );
+});
+
+test("householdWriteSocket: glass/pair sitting cannot ride the anonymous page socket", () => {
+  // StepUpHost verifies with storedBearer(); the shared page socket
+  // is lan-trust-operator. A widen on that socket never applies.
+  assert.equal(householdWriteSocket(true), "stored-bearer");
+  assert.equal(householdWriteSocket(false), "shared");
 });
 
 test("firstPaintStep: in-flight / failed get -> none (no fabricated usage modal)", () => {

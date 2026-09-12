@@ -17,6 +17,9 @@ import { readFrameworkErrorEnvelope } from "../../src/runtime/ws-transport.ts";
 import { dispatchWithStepUp } from "../../src/runtime/step-up-dispatch.ts";
 import { isElevationRequired } from "../../src/runtime/step-up-elevation.ts";
 import { HOUSEHOLD_SET_OP } from "../../src/features/household/household-protection.ts";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 // ---- the shared reader lifts subclass from every framework location ----
 
@@ -132,4 +135,31 @@ test("operator cancels the card -> original step_up_required refusal, no apply",
   // The hook keys off isElevationRequired here to show the system-password ask
   // (household.stepUpNeeded) and leaves lend unchanged - never a bare 403.
   assert.equal(isElevationRequired(err!), true);
+});
+
+test("household set rides the stored-bearer socket when a sitting can exist", () => {
+  const hook = readFileSync(
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "..",
+      "src",
+      "features",
+      "household",
+      "useHouseholdProtection.ts"
+    ),
+    "utf8"
+  );
+  assert.ok(
+    /householdWriteSocket/.test(hook),
+    "set must pick the socket that matches StepUpHost's caller"
+  );
+  assert.ok(
+    /new WsTransport/.test(hook) && /bearerToken: bearer/.test(hook),
+    "a stored kiosk/pair bearer must be presented on the write, not the anonymous page socket"
+  );
+  assert.ok(
+    /HOUSEHOLD_GET_OP/.test(hook) && /shared/.test(hook),
+    "get stays on the shared LAN-trust socket"
+  );
 });

@@ -286,6 +286,27 @@ export function applyHappening(
 
 // --- set body ------------------------------------------------------------
 
+/** Which socket `household_protection_set` must ride.
+ *
+ *  StepUpHost verifies with `storedBearer()` when one exists, so the
+ *  sitting is bound to `bearer:<token-id>`. The shared page socket is
+ *  anonymous LAN-trust (`lan-trust-operator`). A widen sent on that
+ *  socket cannot spend a kiosk or pair sitting — validate returns
+ *  WrongPeer / `step_up_required` and the level never moves. That is
+ *  why Play only could be chosen (first-start needs no sitting) and
+ *  then could not be left on glass or a paired browser.
+ *
+ *  Unpaired LAN-trust has no stored bearer; verify and set are both
+ *  `lan-trust-operator`, so the shared socket is the right one.
+ */
+export type HouseholdWriteSocket = "shared" | "stored-bearer";
+
+export function householdWriteSocket(
+  hasStoredBearer: boolean
+): HouseholdWriteSocket {
+  return hasStoredBearer ? "stored-bearer" : "shared";
+}
+
 export function buildSetBody(input: HouseholdSetInput): HouseholdSetBody {
   const body: HouseholdSetBody = { lend: input.lend };
   if (input.level !== undefined) {

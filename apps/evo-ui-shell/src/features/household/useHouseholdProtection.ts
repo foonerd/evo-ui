@@ -8,9 +8,11 @@
 // (StepUpHost) and retries with the token, with no per-surface gate here.
 // Neither op is on NON_ELEVATABLE_OPS.
 //
-// Both ops are admitted on LAN-trust: they ride the shared page-lifetime
-// transport (anonymous, no bearer, no ?bearer=, no localStorage). This hook
-// owns its subscription + listeners, never the socket.
+// Get rides the shared page-lifetime transport (anonymous LAN-trust).
+// Set does not, when a kiosk/pair bearer is stored: StepUpHost binds
+// the sitting to that bearer, and a widen on the anonymous socket
+// cannot spend it. This hook owns its subscription + listeners; the
+// write socket is one-shot and closed after the set.
 //
 // State flow (frozen wire): first paint = household_protection_get; the
 // happenings bus (household_protection_changed, spectrum denied as every
@@ -20,22 +22,53 @@
 // during the gap is picked up without polling.
 
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
-import { tryUseFrameworkTransport } from "../../runtime/framework-transport";
+import { storedBearer } from "../../runtime/bearer";
+import {
+  frameworkWsUrl,
+  tryUseFrameworkTransport
+} from "../../runtime/framework-transport";
 import { attachSharedHappenings } from "../../runtime/shared-framework-attach";
 import { isElevationRequired } from "../../runtime/step-up-elevation.ts";
+import { WsTransport } from "../../runtime/ws-transport.ts";
 import { t } from "../../runtime/i18n";
 import {
   decodeHouseholdSnapshot,
   decodeHouseholdHappening,
   applyHappening,
   buildSetBody,
+  householdWriteSocket,
   HOUSEHOLD_GET_OP,
   HOUSEHOLD_SET_OP,
   type HouseholdSnapshot,
   type HouseholdSetInput
 } from "./household-protection";
+import type { WireOpResult } from "../../sdk/types";
 
 export type HouseholdSetResult = { ok: true } | { ok: false; message: string };
+
+/** Set/unlock on the sitting's caller. Get stays on the shared
+ *  LAN-trust socket (it never needs a sitting). */
+async function dispatchHouseholdSet(
+  shared: WsTransport,
+  body: Record<string, unknown>
+): Promise<WireOpResult> {
+  if (householdWriteSocket(storedBearer() !== undefined) === "shared") {
+    return shared.dispatch(HOUSEHOLD_SET_OP, body);
+  }
+  const bearer = storedBearer();
+  if (bearer === undefined) {
+    return shared.dispatch(HOUSEHOLD_SET_OP, body);
+  }
+  const write = new WsTransport({
+    url: frameworkWsUrl(),
+    bearerToken: bearer
+  });
+  try {
+    return await write.dispatch(HOUSEHOLD_SET_OP, body);
+  } finally {
+    await write.close();
+  }
+}
 
 export interface HouseholdProtection {
   /** false in designer / tests with no transport - the modal stays inert. */
@@ -126,8 +159,11 @@ export function useHouseholdProtection(): HouseholdProtection {
       try {
         const body = buildSetBody(input) as unknown as Record<string, unknown>;
         // Direct op: dispatch funnels through the step-up card on a
-        // step_up_required refusal and retries with the token.
-        const r = await transport.dispatch(HOUSEHOLD_SET_OP, body);
+        // step_up_required refusal and retries with the token. The
+        // write rides the same caller as that card (kiosk/pair
+        // bearer when stored; otherwise the shared LAN-trust
+        // socket). See householdWriteSocket.
+        const r = await dispatchHouseholdSet(transport, body);
         if (r.error !== undefined) {
           // A widen / Stop lending is step_up_required. transport.dispatch
           // raises the password card and retries with the token; we only get
