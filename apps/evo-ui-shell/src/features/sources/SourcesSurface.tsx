@@ -25,9 +25,12 @@ import {
   X
 } from "lucide-preact";
 import type { JSX } from "preact";
-import { useResponderGranted, reauthPromptResponder } from "../prompts/usePromptResponder";
+import { reauthPromptResponder, useResponderGranted } from "../prompts/usePromptResponder";
 import {
-  hasNetworkAdmin,
+  canStartShareAdd,
+  showCredentialResponderNotice
+} from "./share-add-gate";
+import {
   useDiscoveredNas,
   useNetworkShares,
   type AddSharePayload,
@@ -39,23 +42,12 @@ import { friendlyVerbError } from "./friendly-error";
 import { KebabMenu } from "../../components/KebabMenu";
 import { ConfirmDialog, Modal } from "../../components/dialogs";
 import { PairDeviceFlow } from "../pairing/PairDeviceFlow";
+import { isPairRequired, isHouseholdLocked } from "../../runtime/authz-classify";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 
 function stateKey(state: ShareItem["state"]): string {
   return `sources.state.${state}`;
-}
-
-/** A verb refusal that pairing (a network_admin bearer) would resolve.
- *  We branch on the framework's structured subclass when present, and
- *  fall back to the shared auth-refusal vocabulary the network page uses. */
-function isAuthRefusal(r: { message?: string; subclass?: string }): boolean {
-  if (r.subclass === "step_up_required" || r.subclass === "pair_expired") {
-    return true;
-  }
-  return /step.?up|scope|permission|denied|unauthori|not.?hold|network_admin|pair/i.test(
-    r.message ?? ""
-  );
 }
 
 /** Reduce a full form payload to the fields that actually changed vs the
@@ -123,23 +115,22 @@ export function SourcesSurface({
   useLocale();
   const shares = useNetworkShares();
   const discovery = useDiscoveredNas();
-  const admin = hasNetworkAdmin();
-  // Adding a credentialed share raises a password prompt, and only the
-  // session holding the responder role can RENDER it; without it the
-  // framework would hold the mutation open for an answer this browser
-  // can never show (root-caused live 2026-07-20). So the responder guard
-  // stays ONLY on the credential-entry controls (add) - never on
-  // mount/unmount/remove/refresh, and never as the network_admin dead-end
-  // it used to be. network_admin is handled on-screen by pairing instead.
-  const canPrompt = useResponderGranted();
+  // Whether THIS session can paint the credential PromptSurface. A user+password
+  // add stocks its secret through that prompt; without the responder the add
+  // must fail closed (see share-add-gate). NOT a network_admin pre-flight.
+  const responderGranted = useResponderGranted();
+  // Household model: adding / managing a share is admitted on LAN-trust and
+  // gated by the household policy, NOT by a client-side network_admin
+  // pre-flight. We no longer pre-flight Pair (open the form; the dispatch
+  // decides). A genuine pair-ceremony refusal still offers Pair below; a
+  // household lock shows the household banner; the credential prompt for a
+  // credentialed SMB add remains a separate responder concern.
   const [dialog, setDialog] = useState<SourcesDialog>(null);
   const [feedback, setFeedback] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [pairOpen, setPairOpen] = useState(false);
-  // Set when a mutation is refused for want of network_admin (or a stale
-  // bearer). We never DISABLE the controls for this - that was the
-  // dead-end tooltip the operator hit before. Instead we surface the
-  // on-screen "Pair this device" path, exactly like the network page.
+  // Set only on a pair-ceremony refusal. Controls stay enabled.
+  // Household lock is a different flag; it never opens Pair.
   const [authRefused, setAuthRefused] = useState(false);
 
   const configured = shares.items ?? [];
@@ -158,10 +149,11 @@ export function SourcesSurface({
     const r = await op();
     setBusy(false);
     if (!r.ok) {
-      if (isAuthRefusal(r)) {
-        // Elevation is handled by the inline pair notice - never dump a
-        // raw scope/permission chain to the operator.
+      if (isPairRequired(r)) {
         setAuthRefused(true);
+        setFeedback("");
+      } else if (isHouseholdLocked(r)) {
+        setAuthRefused(false);
         setFeedback("");
       } else {
         setFeedback(friendlyVerbError(r.message));
@@ -171,18 +163,11 @@ export function SourcesSurface({
     }
   };
 
-  // network_admin is granted by pairing this device. When the session
-  // hasn't paired (or a verb just refused for scope), we offer the
-  // pairing ceremony ON this screen instead of dead-disabling the
-  // buttons - matching the network page. Pairing here re-handshakes in
-  // place (onPaired below), so admin AND the prompt responder light up
-  // without a reload and the operator stays on Sources.
-  const showAuthNotice = !admin || authRefused;
-  // The responder role (also pairing-granted) is what lets THIS browser
-  // render the framework's SMB password prompt. Only credential-entry
-  // controls (add a share) actually raise that prompt, so only those
-  // carry the guard - and the guidance is to pair, never a dead end.
-  const promptLockTitle = canPrompt ? undefined : t("sources.needsResponder");
+  // Pair is offered ONLY on a genuine pair-ceremony refusal (authRefused),
+  // never pre-flighted from session state. Pairing re-handshakes the bearer
+  // in place; it is not the gate for LAN-trust settings under the household
+  // model.
+  const showAuthNotice = authRefused;
 
   return (
     <section className="card feature-surface sources-surface">
@@ -193,12 +178,11 @@ export function SourcesSurface({
         </div>
         <button
           type="button"
-          className="sources-refresh"
-          disabled={busy || !canPrompt}
-          title={promptLockTitle}
+          className="sources-add"
+          disabled={busy}
           onClick={() => setDialog({ kind: "add" })}
         >
-          <Plus size={13} />
+          <Plus size={16} />
           <span>{t("sources.addShare")}</span>
         </button>
       </div>
@@ -409,8 +393,7 @@ export function SourcesSurface({
                   <div className="source-card-actions">
                     <button
                       type="button"
-                      disabled={busy || !canPrompt}
-                      title={promptLockTitle}
+                      disabled={busy}
                       aria-label={t("sources.add")}
                       onClick={() =>
                         setDialog({
@@ -435,6 +418,7 @@ export function SourcesSurface({
           prefillHost={dialog.prefillHost}
           prefillPath={dialog.prefillPath}
           availableShares={dialog.availableShares}
+          responderGranted={responderGranted}
           onCancel={() => setDialog(null)}
           onSubmit={(payload) => {
             setDialog(null);
@@ -445,6 +429,7 @@ export function SourcesSurface({
       {dialog?.kind === "edit" ? (
         <AddShareDialog
           editShare={dialog.share}
+          responderGranted={responderGranted}
           onCancel={() => setDialog(null)}
           onSubmit={(payload) => {
             const share = dialog.share;
@@ -493,6 +478,7 @@ function AddShareDialog({
   prefillHost,
   prefillPath,
   availableShares,
+  responderGranted,
   onCancel,
   onSubmit
 }: {
@@ -502,6 +488,9 @@ function AddShareDialog({
   prefillHost?: string;
   prefillPath?: string;
   availableShares?: string[];
+  /** Whether this session can paint the credential prompt. A user+password
+   *  submit is blocked (fail closed) when it cannot. */
+  responderGranted: boolean;
   onCancel: () => void;
   onSubmit: (payload: AddSharePayload) => void;
 }) {
@@ -524,6 +513,13 @@ function AddShareDialog({
     host.trim().length > 0 &&
     path.trim().length > 0 &&
     (credKind === "guest" || username.trim().length > 0);
+  // Fail-closed: a user+password submit needs the credential prompt, which only
+  // a responder-holding session can paint. Guest proceeds. Not a Pair path.
+  const canStart = canStartShareAdd({ valid, credKind, responderGranted });
+  const showResponderNotice = showCredentialResponderNotice({
+    credKind,
+    responderGranted
+  });
   return (
     <Modal
       title={editShare ? t("sources.editShare", { alias: editShare.alias }) : t("sources.addShare")}
@@ -533,7 +529,7 @@ function AddShareDialog({
         className="evo-modal-form"
         onSubmit={(event) => {
           event.preventDefault();
-          if (!valid) return;
+          if (!canStart) return;
           // Vault key derived from the alias - the vault entry the
           // plugin resolves the password from. Stocking that entry
           // is the framework's promised prompt flow (not yet
@@ -684,7 +680,13 @@ function AddShareDialog({
                 onInput={(e) => setDomain((e.currentTarget as HTMLInputElement).value)}
               />
             </label>
-            <p className="evo-modal-hint">{t("sources.form.passwordViaPrompt")}</p>
+            {showResponderNotice ? (
+              <p className="evo-modal-hint sources-form-blocked" role="alert">
+                {t("sources.form.credentialsNeedResponder")}
+              </p>
+            ) : (
+              <p className="evo-modal-hint">{t("sources.form.passwordViaPrompt")}</p>
+            )}
           </>
         ) : null}
         <label className="evo-modal-label">
@@ -708,7 +710,7 @@ function AddShareDialog({
           <button
             type="submit"
             className="evo-modal-button evo-modal-button-primary"
-            disabled={!valid}
+            disabled={!canStart}
           >
             {editShare ? t("sources.form.save") : t("sources.form.addAndMount")}
           </button>

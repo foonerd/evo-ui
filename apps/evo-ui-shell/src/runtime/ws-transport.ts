@@ -21,8 +21,9 @@
 
 import type { Transport } from "../sdk/transport";
 import type { CallOpts, SubscribeOpts, WireOpResult } from "../sdk/types";
-import { DEFAULT_OPEN_DEADLINE_MS } from "./deadline.ts";
+import { DEFAULT_OPEN_DEADLINE_MS, RECOVERY_OPEN_DEADLINE_MS } from "./deadline.ts";
 import { dispatchWithStepUp, type StepUpBridge } from "./step-up-dispatch.ts";
+import { liftErrorSubclass } from "./wire-error.ts";
 
 // App-level operator-password bridge, installed once by StepUpHost.
 // Module-global so EVERY WsTransport instance (the shared socket and
@@ -32,6 +33,10 @@ import { dispatchWithStepUp, type StepUpBridge } from "./step-up-dispatch.ts";
 let stepUpBridge: StepUpBridge | null = null;
 export function setStepUpBridge(bridge: StepUpBridge | null): void {
   stepUpBridge = bridge;
+}
+
+export function getStepUpBridge(): StepUpBridge | null {
+  return stepUpBridge;
 }
 
 interface IncomingFrame {
@@ -89,6 +94,11 @@ export interface WsTransportConfig {
    *  layer can retry or the shell can degrade. Bounds the critical
    *  path "no matter what". Defaults to DEFAULT_OPEN_DEADLINE_MS. */
   openTimeoutMs?: number;
+  /** WS open budget for RECOVERY attempts - the transport's own
+   *  reconnect after a drop, and any caller driving connectRecovery()
+   *  after the critical budget is spent. Sized for a real handshake,
+   *  never used on first paint. Defaults to RECOVERY_OPEN_DEADLINE_MS. */
+  recoveryOpenTimeoutMs?: number;
 }
 
 const DEFAULT_BACKOFF: readonly number[] = [500, 1000, 2000, 5000, 10_000];
@@ -147,6 +157,7 @@ export class WsTransport implements Transport {
   private bearerToken: string | undefined;
   private readonly backoffMs: readonly number[];
   private readonly openTimeoutMs: number;
+  private readonly recoveryOpenTimeoutMs: number;
 
   private socket: WebSocket | null = null;
   private nextRequestId = 1;
@@ -179,6 +190,8 @@ export class WsTransport implements Transport {
     this.bearerToken = cfg.bearerToken;
     this.backoffMs = cfg.backoffMs ?? DEFAULT_BACKOFF;
     this.openTimeoutMs = cfg.openTimeoutMs ?? DEFAULT_OPEN_DEADLINE_MS;
+    this.recoveryOpenTimeoutMs =
+      cfg.recoveryOpenTimeoutMs ?? RECOVERY_OPEN_DEADLINE_MS;
     // Send a clean WS close on tab unload. Using socket.close()
     // (rather than transport.close()) keeps the work synchronous
     // enough to flight before the page is gone - the browser
@@ -254,6 +267,17 @@ export class WsTransport implements Transport {
       throw new Error("WebSocket transport is closed");
     }
     await this.ensureSocket();
+  }
+
+  /** Open on the RECOVERY budget (a real-handshake-sized deadline) for
+   *  callers driving reconnection AFTER the critical budget is spent
+   *  (playback recovery loop). Never used on the first-paint critical
+   *  path - that stays on connect()/openTimeoutMs. */
+  public async connectRecovery(): Promise<void> {
+    if (this.closing) {
+      throw new Error("WebSocket transport is closed");
+    }
+    await this.ensureSocket(this.recoveryOpenTimeoutMs);
   }
 
   public async close(): Promise<void> {
@@ -491,14 +515,16 @@ export class WsTransport implements Transport {
     }
   }
 
-  private async ensureSocket(): Promise<WebSocket> {
+  private async ensureSocket(
+    deadlineMs: number = this.openTimeoutMs
+  ): Promise<WebSocket> {
     if (this.socket !== null && this.socket.readyState === WebSocket.OPEN) {
       return this.socket;
     }
     if (this.connectPromise !== null) {
       return await this.connectPromise;
     }
-    this.connectPromise = this.openSocket();
+    this.connectPromise = this.openSocket(deadlineMs);
     try {
       return await this.connectPromise;
     } finally {
@@ -506,7 +532,9 @@ export class WsTransport implements Transport {
     }
   }
 
-  private async openSocket(): Promise<WebSocket> {
+  private async openSocket(
+    deadlineMs: number = this.openTimeoutMs
+  ): Promise<WebSocket> {
     // Canonical bearer subprotocol is `evo.bearer.<token>` (the
     // framework's extract path matches exactly this prefix; the
     // token itself is base64url unpadded, so the whole value is a
@@ -533,9 +561,9 @@ export class WsTransport implements Transport {
           // ignore - socket may already be tearing down
         }
         reject(
-          new Error(`WebSocket open exceeded ${this.openTimeoutMs}ms deadline`)
+          new Error(`WebSocket open exceeded ${deadlineMs}ms deadline`)
         );
-      }, this.openTimeoutMs);
+      }, deadlineMs);
       ws.addEventListener("open", () => {
         if (settled) {
           // Opened after we already gave up; close the late socket.
@@ -602,8 +630,13 @@ export class WsTransport implements Transport {
             code: frame.outcome.code,
             message: frame.outcome.message,
           };
-          const sub = (frame.outcome as { subclass?: unknown }).subclass;
-          if (typeof sub === "string" && sub.length > 0) {
+          // Lift the subclass from EITHER outcome.details.subclass or a
+          // flattened outcome.subclass (the direct ops flatten it) - the same
+          // reader every boundary uses, so step_up_required survives here too.
+          const sub = liftErrorSubclass(
+            frame.outcome as unknown as Record<string, unknown>
+          );
+          if (sub !== undefined) {
             errOut.subclass = sub;
           }
           resolve({ error: errOut });
@@ -688,7 +721,7 @@ export class WsTransport implements Transport {
       if (this.closing || this.socket !== null) {
         return;
       }
-      void this.openSocket()
+      void this.openSocket(this.recoveryOpenTimeoutMs)
         .then((ws) => {
           // Re-establish active subscriptions on the new socket
           // using each subscription's recorded op + payload, so
@@ -721,7 +754,7 @@ export class WsTransport implements Transport {
  *  "transport delivered a response"; the inner value carries the
  *  actual operation outcome. Returns the unified error shape when
  *  detected, otherwise null. */
-function readFrameworkErrorEnvelope(
+export function readFrameworkErrorEnvelope(
   value: unknown,
 ): { code: string; message: string; subclass?: string } | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -745,12 +778,12 @@ function readFrameworkErrorEnvelope(
     code,
     message: errObj["message"] as string,
   };
-  const details = errObj["details"];
-  if (typeof details === "object" && details !== null && !Array.isArray(details)) {
-    const sub = (details as Record<string, unknown>)["subclass"];
-    if (typeof sub === "string" && sub.length > 0) {
-      out.subclass = sub;
-    }
+  // Lift the subclass from details.subclass OR a flattened error.subclass -
+  // the direct ops (household_protection_set) emit the flattened form, so a
+  // details-only read dropped step_up_required and the card never opened.
+  const sub = liftErrorSubclass(errObj);
+  if (sub !== undefined) {
+    out.subclass = sub;
   }
   return out;
 }

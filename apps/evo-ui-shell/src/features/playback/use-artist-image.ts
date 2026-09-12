@@ -1,27 +1,34 @@
 // Resolve the current artist's image for the fullscreen artwork
-// slideshow, using the SAME cache-first resolver the Browse/library
-// tiles use (`artwork.resolve_artist_artwork` on the artwork.providers
-// shelf, fanart.tv-backed). It is a light metadata lookup, not a fresh
-// image download: the framework caches the result, and the image bytes
-// cache in the browser after first load. Returns null when there is no
-// transport, no artist, no key, or no match - the slideshow then simply
-// shows what it does have (the cover).
+// slideshow. Single paint path: this returns the VALIDATED byte endpoint
+// URL (scheme=artist-name), the same serve path the browse tiles paint -
+// never a raw provider image_url from the resolve verb. That verb URL was
+// the second, unvalidated paint path: it could hand back a placeholder
+// silhouette the serve path would reject, so the fullscreen zoom showed a
+// grey blob where the tile showed nothing.
+//
+// The byte endpoint applies pixel placeholder rejection (size=large is
+// measured; Original is a passthrough that fails open, so it is NOT used
+// here for portraits). A 200 means a real validated image; a 404 means
+// none, and we return null so the slideshow simply omits the frame rather
+// than showing a broken image. One deliberate lookup per artist, memoised.
 
 import { useEffect, useRef, useState } from "preact/hooks";
-import { tryUseFrameworkTransport } from "../../runtime/framework-transport";
-import { pluginRequest } from "../../runtime/plugin-request-codec";
 
-const ARTWORK_SHELF = "artwork.providers";
-const RESOLVE_ARTIST_ARTWORK = "artwork.resolve_artist_artwork";
+function artistByteUrl(artist: string): string {
+  return (
+    "/api/v1/audio/artwork?scheme=artist-name&value=" +
+    encodeURIComponent(artist) +
+    "&size=large"
+  );
+}
 
 export function useArtistImage(artist: string | null): string | null {
-  const transport = tryUseFrameworkTransport();
   // Per-artist memo so re-opening the slideshow never re-asks.
   const cache = useRef<Map<string, string | null>>(new Map());
   const [url, setUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    if (artist === null || artist.length === 0 || transport === null) {
+    if (artist === null || artist.length === 0 || typeof fetch === "undefined") {
       setUrl(null);
       return undefined;
     }
@@ -31,27 +38,32 @@ export function useArtistImage(artist: string | null): string | null {
       return undefined;
     }
     let cancelled = false;
+    const byteUrl = artistByteUrl(artist);
     void (async () => {
-      const r = await pluginRequest(transport, ARTWORK_SHELF, RESOLVE_ARTIST_ARTWORK, {
-        v: 1,
-        artist
-      });
       let resolved: string | null = null;
-      if (
-        r.error === undefined &&
-        r.value !== null &&
-        typeof r.value === "object"
-      ) {
-        const u = (r.value as Record<string, unknown>)["image_url"];
-        if (typeof u === "string" && u.length > 0) resolved = u;
+      // Only a SUCCESS is memoised. A miss is NOT cached, because a miss
+      // today is not necessarily "no portrait" - the byte endpoint maps an
+      // admission/queue timeout to the same failure as an honest absence,
+      // so caching it null would strand the artist on a glyph forever (the
+      // exact permanent-negative bug this hook shipped with). Not caching
+      // means the next deliberate zoom re-asks; once the serve path
+      // distinguishes 503 (transient, retry) from 404 (absent, cache),
+      // this can memoise the honest-404 too.
+      try {
+        const res = await fetch(byteUrl, { method: "GET" });
+        if (res.ok) {
+          resolved = byteUrl;
+          cache.current.set(artist, resolved);
+        }
+      } catch {
+        // Network error - not cached; the slideshow shows the cover only.
       }
-      cache.current.set(artist, resolved);
       if (!cancelled) setUrl(resolved);
     })();
     return () => {
       cancelled = true;
     };
-  }, [artist, transport]);
+  }, [artist]);
 
   return artist === null ? null : url;
 }

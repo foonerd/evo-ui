@@ -1,11 +1,10 @@
 // StepUpHost - THE single operator-password card for the whole app.
 // Mounted once at the app root. It installs a bridge into the WS
-// transport (setStepUpBridge); any dispatch that hits an elevation
-// refusal (permission_denied / step_up_required) asks the bridge for a
+// transport (setStepUpBridge); any dispatch that classifyAuthz names
+// elevate (subclass === step_up_required only) asks the bridge for a
 // token, which raises THIS card, verifies the operator password, and
 // hands the token back so the transport retries. One card, one in-
-// memory token cache, every surface - the per-surface step-up gates are
-// retired in favour of this.
+// memory token cache, every surface. Pair is a different ceremony.
 //
 // The token is held in memory only (never persisted), reused across the
 // operator's sitting, and cleared by the transport when a retry shows it
@@ -35,20 +34,32 @@ export function StepUpHost(): JSX.Element | null {
   const [error, setError] = useState<string | null>(null);
   const tokenRef = useRef<string | null>(null);
   const pendingRef = useRef<Pending | null>(null);
+  const listenersRef = useRef(new Set<(token: string | null) => void>());
   pendingRef.current = pending;
 
   useEffect(() => {
+    const notify = (token: string | null): void => {
+      listenersRef.current.forEach((listener) => listener(token));
+    };
     const bridge: StepUpBridge = {
       getToken: () => tokenRef.current,
       setToken: (token) => {
         tokenRef.current = token;
+        notify(token);
       },
       acquire: () =>
         new Promise<string | null>((resolve) => {
           setPassword("");
           setError(null);
           setPending({ resolve });
-        })
+        }),
+      subscribe: (listener) => {
+        listenersRef.current.add(listener);
+        listener(tokenRef.current);
+        return () => {
+          listenersRef.current.delete(listener);
+        };
+      }
     };
     setStepUpBridge(bridge);
     return () => {

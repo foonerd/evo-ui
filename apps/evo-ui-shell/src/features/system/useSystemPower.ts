@@ -19,7 +19,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { WsTransport } from "../../runtime/ws-transport";
+import { pluginRequest } from "../../runtime/plugin-request-codec";
+import { verbErrorMessage } from "../../runtime/verb-error";
 import { connectWithRetry } from "../../runtime/connect-retry";
+import { storedBearer } from "../../runtime/bearer";
+import { frameworkWsUrl } from "../../runtime/framework-transport";
+import { decodeFlightEnabled } from "../network/network-nm-decoders";
 import {
   decodePluginNames,
   classifyPowerVerbOutcome,
@@ -28,6 +33,16 @@ import {
 } from "../audio/audio-options-decoders";
 
 const POWER_SHELF = "system.power";
+const NETWORK_SHELF = "networking.link";
+const FLIGHT_GET = "network.nm.flight_mode.get";
+const FLIGHT_SET = "network.nm.flight_mode.set";
+
+/** Result of a Flight-mode toggle - a reversible network radio switch,
+ *  so a plain ok/refused rather than the reboot/power-off outcomes. */
+export interface FlightToggleResult {
+  ok: boolean;
+  message?: string;
+}
 
 /** Public surface of the hook. */
 export interface SystemPowerState {
@@ -39,24 +54,29 @@ export interface SystemPowerState {
   reboot: () => Promise<PowerVerbOutcome>;
   /** Dispatch power_off_device. */
   powerOff: () => Promise<PowerVerbOutcome>;
-}
-
-function frameworkUrl(): string {
-  if (typeof window === "undefined") return "ws://localhost/api/v1/ws";
-  const override = window.localStorage.getItem("evo.framework.ws_url");
-  if (override !== null && override.length > 0) return override;
-  const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${scheme}//${window.location.host}/api/v1/ws`;
+  /** True only when the device answers the network flight-mode read -
+   *  so the power-cluster toggle stays hidden on a device without the
+   *  network manager, per honest-surfaces. */
+  flightAvailable: boolean;
+  /** Current Flight mode (Wi-Fi + AP radios suspended). */
+  flightEnabled: boolean;
+  /** Toggle Flight mode via the existing network verb. */
+  setFlight: (enabled: boolean) => Promise<FlightToggleResult>;
 }
 
 export function useSystemPower(): SystemPowerState {
   const [available, setAvailable] = useState(false);
+  const [flightAvailable, setFlightAvailable] = useState(false);
+  const [flightEnabled, setFlightEnabled] = useState(false);
   const transportRef = useRef<WsTransport | null>(null);
+  // Separate bearer-scoped socket for the Flight-mode WRITE - opened
+  // lazily on first toggle, torn down on unmount (see cleanup).
+  const flightTxRef = useRef<WsTransport | null>(null);
 
   useEffect(() => {
     if (typeof WebSocket === "undefined") return undefined;
     let cancelled = false;
-    const transport = new WsTransport({ url: frameworkUrl() });
+    const transport = new WsTransport({ url: frameworkWsUrl() });
     transportRef.current = transport;
 
     const seed = async (): Promise<void> => {
@@ -73,6 +93,22 @@ export function useSystemPower(): SystemPowerState {
             decodePluginNames(plugins.value).includes(SYSTEM_POWER_PLUGIN)
           );
         }
+        // Flight-mode READ is anonymous-OK (verified live), so it rides
+        // this same anonymous socket - no reinvented control plane, just
+        // the existing network verb. Hidden until the device answers, so
+        // a box without the network manager shows nothing rather than a
+        // dead switch. Payload MUST mirror the Network panel's own read
+        // (empty object): the verb's payload struct denies unknown
+        // fields. The flag is nested under flight_mode.enabled - decoded
+        // by the canonical network decoder, verified against the rig.
+        const fl = await pluginRequest(transport, NETWORK_SHELF, FLIGHT_GET, {});
+        if (!cancelled && fl.error === undefined) {
+          const on = decodeFlightEnabled(fl.value);
+          if (on !== null) {
+            setFlightAvailable(true);
+            setFlightEnabled(on);
+          }
+        }
       } catch {
         // The framework is unreachable: the power affordances stay
         // hidden rather than offered as buttons that cannot act.
@@ -84,6 +120,10 @@ export function useSystemPower(): SystemPowerState {
       cancelled = true;
       void transport.close();
       transportRef.current = null;
+      if (flightTxRef.current !== null) {
+        void flightTxRef.current.close();
+        flightTxRef.current = null;
+      }
     };
   }, []);
 
@@ -116,5 +156,43 @@ export function useSystemPower(): SystemPowerState {
     [dispatchVerb]
   );
 
-  return { available, reboot, powerOff };
+  const setFlight = useCallback(
+    async (enabled: boolean): Promise<FlightToggleResult> => {
+      if (typeof WebSocket === "undefined") {
+        return { ok: false, message: "Not connected to the device." };
+      }
+      // Flight write stays on this private socket so a stored bearer
+      // can ride it after an API/headless pair. Under household policy
+      // it is admitted on LAN-trust when unpaired — do not pre-flight
+      // Pair. Opened lazily (first toggle) and torn down on unmount.
+      let tx = flightTxRef.current;
+      if (tx === null) {
+        tx = new WsTransport({
+          url: frameworkWsUrl(),
+          bearerToken: storedBearer()
+        });
+        flightTxRef.current = tx;
+      }
+      // Mirror the Network panel's set exactly - { enabled } only.
+      const r = await pluginRequest(tx, NETWORK_SHELF, FLIGHT_SET, { enabled });
+      if (r.error === undefined) {
+        setFlightEnabled(enabled);
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        message: verbErrorMessage(r.error, "Flight mode change was refused.")
+      };
+    },
+    []
+  );
+
+  return {
+    available,
+    reboot,
+    powerOff,
+    flightAvailable,
+    flightEnabled,
+    setFlight
+  };
 }

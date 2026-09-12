@@ -10,6 +10,8 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { MutableRef } from "preact/hooks";
 import { WsTransport } from "./ws-transport";
+import { clearBearer } from "./bearer";
+import { resolveConnectFailure, resolveProbeRead } from "./stale-bearer-policy";
 import { pluginRequest } from "./plugin-request-codec";
 import { connectWithRetry, MAX_CONNECT_ATTEMPTS } from "./connect-retry";
 import { verbErrorMessage } from "./verb-error";
@@ -138,10 +140,20 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
   // with it - without re-capturing shelf/decoders mid-flight.
   const bearerRef = useRef(config.bearerToken);
   bearerRef.current = config.bearerToken;
+  // Set true when a bearer socket was refused and we are re-probing
+  // anonymously to decide whether the TOKEN is dead (device reset /
+  // revoked / expired -> anon read lands) or the DEVICE is down (anon
+  // connect also fails). While true the effect opens an anonymous
+  // private socket regardless of the stored bearer. A deliberate
+  // reauth() (inline re-pair) clears it so the new bearer is retried.
+  const forceAnonRef = useRef(false);
   // Bumped by reauth() to force the effect to tear the socket down and
   // reopen it with the current bearer.
   const [reauthNonce, setReauthNonce] = useState(0);
-  const reauth = useCallback(() => setReauthNonce((n) => n + 1), []);
+  const reauth = useCallback(() => {
+    forceAnonRef.current = false;
+    setReauthNonce((n) => n + 1);
+  }, []);
 
   useEffect(() => {
     const cfg = configRef.current;
@@ -157,11 +169,20 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
       return;
     }
 
-    const bearer = bearerRef.current;
+    // While re-probing (forceAnonRef) we deliberately open anonymously
+    // even though a bearer is stored, so the anon read can prove the
+    // token dead vs the device down.
+    const probing = forceAnonRef.current;
+    const storedBearerTok = bearerRef.current;
+    const hadStoredBearer =
+      typeof storedBearerTok === "string" && storedBearerTok.length > 0;
+    const bearer = probing ? undefined : storedBearerTok;
     const bearerScoped = typeof bearer === "string" && bearer.length > 0;
     // Shared when available and anonymous; otherwise a private socket
     // (bearer shelves, or designer mounts without PlayerShellProviders).
-    const ownsTransport = bearerScoped || sharedTransport === null;
+    // Force a PRIVATE anonymous socket while probing so the probe's
+    // read + failure land in seed() below (one place to decide).
+    const ownsTransport = bearerScoped || probing || sharedTransport === null;
     const transport = ownsTransport
       ? new WsTransport({
           url: frameworkUrl(),
@@ -241,11 +262,37 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
           cfg.readRequestType,
           { v: PAYLOAD_VERSION }
         );
-        if (!cancelled && initial.error === undefined) {
+        if (cancelled) return;
+        if (initial.error === undefined) {
           const seeded = cfg.decodeRead(initial.value);
           if (seeded !== null) setState(seeded);
         }
-        if (cancelled) return;
+        const probeRead = resolveProbeRead({
+          probing,
+          readLanded: initial.error === undefined
+        });
+        if (probeRead === "purge") {
+          // The anonymous read landed where the bearer socket was
+          // refused: the stored token is dead (device reset / revoked /
+          // expired), not the device. Purge it - the surface drops to
+          // its unpaired "pair to manage" state with this live read-only
+          // content, no incognito / site-data clearing.
+          clearBearer();
+          bearerRef.current = undefined;
+          forceAnonRef.current = false;
+        } else if (probeRead === "backout") {
+          // Anon socket connected but the read was refused even
+          // anonymously -> this shelf's read needs a capability the LAN
+          // principal lacks, so we CANNOT prove the bearer is the
+          // culprit. Back out (keep the token) and surface an honest
+          // error; a retry re-tries the bearer.
+          forceAnonRef.current = false;
+          setConnection({
+            kind: "error",
+            reason: cfg.messages.noResponse(MAX_CONNECT_ATTEMPTS, "read refused")
+          });
+          return;
+        }
 
         const handleHappening = (raw: unknown): void => {
           if (cancelled) return;
@@ -272,6 +319,20 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
         })();
       } catch (err) {
         if (cancelled) return;
+        if (resolveConnectFailure({ hadStoredBearer, probing }) === "probe") {
+          // The bearer socket's upgrade was refused (framework 401
+          // "token verify failed") OR the device is unreachable - the
+          // browser collapses both to WS close 1006, so we cannot tell
+          // yet. Re-probe anonymously: an anon read that lands proves
+          // the token dead; an anon connect that also fails proves the
+          // device down (handled on the probe re-run's surface-error).
+          forceAnonRef.current = true;
+          setReauthNonce((n) => n + 1);
+          return;
+        }
+        // No bearer to blame, or the anonymous probe's connect also
+        // failed (device genuinely unreachable): honest transport error.
+        forceAnonRef.current = false;
         const detail = err instanceof Error ? err.message : String(err);
         setConnection({
           kind: "error",

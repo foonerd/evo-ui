@@ -5,6 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  decodeEnqueueSelectionOutcome,
   decodeQueueItem,
   decodeQueueState,
   decodeQueueStateHappening,
@@ -259,6 +260,62 @@ test("decodeSkipOutcome decodes the stopped outcome with reason", () => {
 test("decodeSkipOutcome rejects unknown kind tokens", () => {
   assert.equal(decodeSkipOutcome({ outcome: { kind: "garbled" } }), null);
   assert.equal(decodeSkipOutcome({}), null);
+});
+
+// --- decodeEnqueueSelectionOutcome -------------------------------
+
+test("decodeEnqueueSelectionOutcome decodes an empty container", () => {
+  const outcome = decodeEnqueueSelectionOutcome({
+    v: 1,
+    status: "empty",
+    mode: "append",
+    kind: "container",
+    enqueued: 0,
+    enqueued_count: 0,
+    truncated: false,
+    next_page: null,
+    detail: "container subtree carried no playable leaf items; queue unchanged"
+  });
+  assert.deepEqual(outcome, {
+    status: "empty",
+    enqueuedCount: 0,
+    truncated: false,
+    detail: "container subtree carried no playable leaf items; queue unchanged"
+  });
+});
+
+test("decodeEnqueueSelectionOutcome decodes a successful enqueue", () => {
+  const outcome = decodeEnqueueSelectionOutcome({
+    v: 1,
+    status: "ok",
+    mode: "replace",
+    kind: "container",
+    enqueued: 12,
+    enqueued_count: 12,
+    truncated: true,
+    next_page: null
+  });
+  assert.deepEqual(outcome, {
+    status: "ok",
+    enqueuedCount: 12,
+    truncated: true
+  });
+});
+
+test("decodeEnqueueSelectionOutcome refuses a lying empty count", () => {
+  assert.equal(
+    decodeEnqueueSelectionOutcome({
+      status: "empty",
+      enqueued_count: 3
+    }),
+    null
+  );
+});
+
+test("decodeEnqueueSelectionOutcome refuses unknown status and missing count", () => {
+  assert.equal(decodeEnqueueSelectionOutcome({ status: "ok" }), null);
+  assert.equal(decodeEnqueueSelectionOutcome({ status: "queued" }), null);
+  assert.equal(decodeEnqueueSelectionOutcome(null), null);
 });
 
 // --- formatDurationMs --------------------------------------------

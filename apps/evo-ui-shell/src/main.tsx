@@ -31,6 +31,7 @@ import { PresentationProvider, usePresentation } from "./runtime/presentation-co
 import { onEmbedProfileChange, readEmbedProfile } from "./runtime/designer-embed";
 import { isLoopbackHost, scopeFromPath } from "./runtime/session-scope";
 import { startBundleUpdater } from "./runtime/bundle-updater";
+import { installKeyboardViewportGuard } from "./runtime/keyboard-viewport";
 import "./styles.css";
 
 const root = document.getElementById("app");
@@ -77,6 +78,8 @@ if (isDesignerMode()) {
 // where an auto-reload would be wrong.
 if (!isDesignerMode() && !isEmbeddedPreview()) {
   startBundleUpdater();
+  // Keep the focused input above the on-screen keyboard, every form.
+  installKeyboardViewportGuard();
 }
 
 /** True when this document is the designer's embedded preview iframe. */

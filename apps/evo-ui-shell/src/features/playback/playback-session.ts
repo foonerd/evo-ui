@@ -18,13 +18,13 @@ import { pluginRequest } from "../../runtime/plugin-request-codec.ts";
 import { DENY_SPECTRUM_PAYLOAD } from "../../runtime/happenings-filter.ts";
 import {
   connectWithRetry,
+  reconnectDelayMs,
   CRITICAL_BACKOFF_MS,
   CRITICAL_CONNECT_ATTEMPTS
 } from "../../runtime/connect-retry.ts";
 import {
   deadlineSignal,
-  DEFAULT_SEED_DEADLINE_MS,
-  RECOVER_PAUSE_MS
+  DEFAULT_SEED_DEADLINE_MS
 } from "../../runtime/deadline.ts";
 import {
   decodeNowPlaying,
@@ -167,52 +167,83 @@ export function startPlaybackSession(
   );
 
   const boot = async (): Promise<void> => {
-    while (!isCancelled()) {
-      try {
-        // Quiet: connecting never triggers the maintenance popup.
-        handlers.onConnection({ kind: "connecting" });
+    if (isCancelled()) return;
 
-        // Already-open shared socket (Strict remount / prior session):
-        // seed now — there will be no second "open" event.
-        if (transport.isOpen()) {
-          bootComplete = true;
-          onLive();
-          return;
-        }
+    // CRITICAL path (first paint). Quiet "connecting" (no popup), the
+    // two-attempt 800ms schedule, degrade inside USABLE_SHELL_BUDGET_MS.
+    // Run it ONCE. Looping the critical schedule against a box whose real
+    // handshake is 1.7-3s is the reboot spinner-loop: every 800ms attempt
+    // dies, forever. On a miss we degrade once, then hand off to recovery.
+    handlers.onConnection({ kind: "connecting" });
 
-        await connectWithRetry(
-          transport,
-          (attempt) => {
-            if (!isCancelled()) {
-              handlers.onConnection({ kind: "connecting", attempt });
-            }
-          },
-          isCancelled,
-          {
-            maxAttempts: CRITICAL_CONNECT_ATTEMPTS,
-            backoffMs: CRITICAL_BACKOFF_MS
+    // Already-open shared socket (Strict remount / prior session):
+    // seed now — there will be no second "open" event.
+    if (transport.isOpen()) {
+      bootComplete = true;
+      onLive();
+      return;
+    }
+
+    try {
+      await connectWithRetry(
+        transport,
+        (attempt) => {
+          if (!isCancelled()) {
+            handlers.onConnection({ kind: "connecting", attempt });
           }
-        );
-        if (isCancelled()) return;
-        bootComplete = true;
-        // open listener may have already called onLive; call again
-        // is idempotent (ensureSubscribed once, seed again is fine).
+        },
+        isCancelled,
+        {
+          maxAttempts: CRITICAL_CONNECT_ATTEMPTS,
+          backoffMs: CRITICAL_BACKOFF_MS
+        }
+      );
+      if (isCancelled()) return;
+      bootComplete = true;
+      // open listener may have already called onLive; call again
+      // is idempotent (ensureSubscribed once, seed again is fine).
+      onLive();
+      return;
+    } catch (err) {
+      if (isCancelled()) return;
+      const detail = err instanceof Error ? err.message : String(err);
+      // Loud degrade, shown ONCE: the critical budget is spent
+      // (restart / upgrade / maintenance / network).
+      handlers.onConnection({
+        kind: "error",
+        reason:
+          "Playback did not respond - the service may be restarting " +
+          `or upgrading. Reconnecting. (${detail})`
+      });
+    }
+
+    // RECOVERY path. The critical budget is spent and we degraded. Keep
+    // trying on the RECOVERY open budget (a real 1.7-3s handshake fits)
+    // with the canonical unbounded backoff. Do NOT re-enter the critical
+    // schedule, and do NOT churn connecting<->error (that flip-flop is the
+    // spinner loop the operator saw). Hold the degrade popup steady until
+    // a socket opens; onLive then clears it.
+    bootComplete = true;
+    let attempt = 0;
+    while (!isCancelled()) {
+      attempt += 1;
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, reconnectDelayMs(attempt))
+      );
+      if (isCancelled()) return;
+      if (transport.isOpen()) {
         onLive();
         return;
-      } catch (err) {
+      }
+      try {
+        await transport.connectRecovery();
         if (isCancelled()) return;
-        const detail = err instanceof Error ? err.message : String(err);
-        // Loud on purpose: steward unreachable after critical budget
-        // (restart / upgrade / maintenance / network).
-        handlers.onConnection({
-          kind: "error",
-          reason:
-            "Playback did not respond - the service may be restarting " +
-            `or upgrading. Retrying. (${detail})`
-        });
-        await new Promise<void>((resolve) =>
-          setTimeout(resolve, RECOVER_PAUSE_MS)
-        );
+        onLive();
+        return;
+      } catch {
+        // Still unreachable. The recovery deadline (not 800ms) lets a real
+        // handshake complete, so this is a genuinely down host - not a
+        // clock miss. Keep the steady degrade popup and try again.
       }
     }
   };

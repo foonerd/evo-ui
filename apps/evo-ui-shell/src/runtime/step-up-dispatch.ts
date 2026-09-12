@@ -20,6 +20,7 @@
 
 import type { WireOpResult } from "../sdk/types";
 import { isElevationRequired } from "./step-up-elevation.ts";
+import { isHouseholdLocked } from "./authz-classify.ts";
 
 /** Raw single-shot send - the transport's own frame send + await. */
 export type RawSend = (
@@ -35,25 +36,38 @@ export interface StepUpBridge {
   setToken(token: string | null): void;
   /** Show the card; resolve with a verified token, or null on cancel. */
   acquire(op: string): Promise<string | null>;
+  /** Notify when the in-memory sitting token appears or is cleared. */
+  subscribe?(listener: (token: string | null) => void): () => void;
 }
 
 const TOKEN_KEY = "step_up_token";
 
-// The flat wire op that carries a plugin shelf verb (shelf +
-// request_type + payload_b64). Its authority is decided ENTIRELY by
-// the caller's bearer capabilities: the framework gates the shelf
-// verb on `granted_capabilities` / `step_up_scopes`, both flattened
-// from the bearer at admission. It never reads a
-// `step_up_token` from the request body, and nothing mutates the
-// connection's step-up scopes after admission. So an inline operator-
-// password step-up CANNOT satisfy a shelf-verb refusal - the only
-// remedy is a bearer that already carries the scope (obtained by
-// pairing). Raising the password card here was a dead-end loop:
-// operator types the password, the token rides the body, the gate
-// ignores it, the retry refuses again. We therefore never elevate the
-// `request` op; the refusal passes through for the surface to render
-// as a "pair this device" prompt.
-const PLUGIN_REQUEST_OP = "request";
+// The plugin shelf-verb op (`request`: shelf + request_type + payload_b64)
+// is elevatable. A step_up_token on the request payload is validated by
+// the steward for that dispatch: consumed before IncomingFrame parsing
+// (deny_unknown_fields stays intact) and never reaches the plugin. Do
+// not put `request` on the skip list.
+
+// Ops that must NEVER raise the operator-password card, even on an
+// elevation-shaped refusal:
+//  - pair_begin / pair_authenticate / pair_complete: the Pair ceremony's
+//    own submit. ClientRequest is deny_unknown_fields and PairAuthenticate
+//    has no step_up_token field, so injecting one on retry is a parse
+//    reject - Pair would never complete and both cards would stack.
+//  - step_up_auth_verify: the card's OWN verify handshake.
+//  - negotiate / release_user_interaction_responder / list_user_interactions:
+//    the responder lifecycle; a refusal here (e.g. release on a LAN-trust
+//    socket lacking user_interaction_responder) is not password-curable and
+//    fires on every remount, app-wide.
+const NON_ELEVATABLE_OPS = new Set<string>([
+  "pair_begin",
+  "pair_authenticate",
+  "pair_complete",
+  "step_up_auth_verify",
+  "negotiate",
+  "release_user_interaction_responder",
+  "list_user_interactions"
+]);
 
 // Re-entrancy guard. Acquiring the token runs `step_up_auth_verify`,
 // which is itself a dispatch through this same path. While the card is
@@ -69,11 +83,32 @@ export async function dispatchWithStepUp(
   opts: unknown,
   bridge: StepUpBridge | null
 ): Promise<WireOpResult> {
-  const first = await send(op, payload, opts);
+  // A live override sitting must ride the first send. The household
+  // gate admits a valid step-up token; it does not return
+  // step_up_required, so a retry-only attach would still 403.
+  const canCarryToken =
+    bridge !== null &&
+    !NON_ELEVATABLE_OPS.has(op) &&
+    !(TOKEN_KEY in payload);
+  const cachedUpFront = canCarryToken ? bridge.getToken() : null;
+  const firstPayload =
+    cachedUpFront !== null
+      ? { ...payload, [TOKEN_KEY]: cachedUpFront }
+      : payload;
+  const first = await send(op, firstPayload, opts);
+  if (
+    first.error !== undefined &&
+    isHouseholdLocked(first.error) &&
+    cachedUpFront !== null &&
+    bridge !== null
+  ) {
+    bridge.setToken(null);
+    return first;
+  }
   if (
     first.error === undefined ||
     !isElevationRequired(first.error) ||
-    op === PLUGIN_REQUEST_OP ||
+    NON_ELEVATABLE_OPS.has(op) ||
     bridge === null ||
     TOKEN_KEY in payload ||
     acquiring

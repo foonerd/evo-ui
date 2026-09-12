@@ -268,9 +268,20 @@ export interface LibraryEntry {
    *  tile lazy-loads it; the browse-artwork flag gates whether the
    *  render uses it. */
   artworkUrl: string | null;
-  /** Directory entries carry a `cover_url` (mpd-directory scheme) -
-   *  the folder's own art (folder.jpg / cover.jpg / embedded), so a
-   *  folder tile shows its cover instead of a generic folder glyph.
+  /** Resolver URL for a directory entry's cover, rendered as a plain
+   *  <img>. The scheme is chosen library-side by pick_directory_cover_url
+   *  (that function is the source of truth; this is a consumer):
+   *   - the folder's own sidecar / folder.jpg / cover.jpg -> mpd-directory
+   *   - the folder's own tracks -> mpd-path (first track's embedded art)
+   *   - a container with only child directories and no tracks of its own
+   *     is treated as artist-shaped -> artist-name (a portrait lookup on
+   *     the folder basename).
+   *  KNOWN DEFECT: the artist-name case misfires for non-artist
+   *  containers (collaborations, labels, box sets, INTERNAL), which 404
+   *  and fall back to the folder glyph. The fix is library-side - restore
+   *  a representative child sleeve for containers and emit artist-name
+   *  only from the artist facet, not from folder browse. The tile has no
+   *  say here; it paints whatever cover_url the library emits.
    *  null for files / when the folder has no art. */
   coverUrl: string | null;
   /** Section A classical-metadata projection. Only meaningful for

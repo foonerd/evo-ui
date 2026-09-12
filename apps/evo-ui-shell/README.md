@@ -32,6 +32,16 @@ Pure logic contracts can run without npm dependencies:
 node --experimental-strip-types --experimental-specifier-resolution=node --test tests/contracts/**/*.test.ts
 ```
 
+## Playback Evidence Snapshot
+
+Generate a playback evidence snapshot report (contracts + attachment checklist):
+
+```bash
+npm run evidence:chunk02
+```
+
+The command writes a timestamped markdown report into `docs/evidence/`.
+
 ## Test-device lifecycle (systemd)
 
 Runtime target policy:

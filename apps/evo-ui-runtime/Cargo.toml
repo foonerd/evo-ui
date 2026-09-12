@@ -1,7 +1,13 @@
 [package]
 name = "evo-ui-runtime"
-version = "0.1.0"
+version = "0.1.13"
 edition = "2024"
+# The floor this crate is actually built against, written down so it
+# is checked rather than remembered. Edition 2024 already requires
+# 1.85; naming it here makes the constraint explicit for the lint
+# allows in proxy.rs, runtime.rs and server.rs, whose nesting exists
+# because let-chains are 1.88 and would not compile at this floor.
+rust-version = "1.85"
 description = "UI runtime service: serves the operator UI shell on http://<device>/ and reverse-proxies framework HTTP + WebSocket traffic to the framework's loopback HTTPS substrate. The operator's browser never sees a TLS cert."
 
 [dependencies]

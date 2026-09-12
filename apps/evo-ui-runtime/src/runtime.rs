@@ -309,6 +309,10 @@ impl EventHub {
             // critical section is short.
             {
                 let state = self.state.lock().ok()?;
+                // Nested on purpose — see the note at the re-check
+                // below. Collapsing needs a let-chain (Rust 1.88);
+                // this crate's floor is 1.85.
+                #[allow(clippy::collapsible_if)]
                 if let Some(frame) = state.latest.as_ref() {
                     if frame.seq > since {
                         return Some(frame.clone());
@@ -322,6 +326,20 @@ impl EventHub {
             // Re-check after subscribing.
             {
                 let state = self.state.lock().ok()?;
+                // Nested on purpose. Collapsing these two conditions
+                // needs a let-chain, and let-chains are Rust 1.88;
+                // this crate's floor is 1.85, where they refuse
+                // outright. The nesting was written by the change
+                // that removed the let-chains for exactly that
+                // reason, and re-collapsing it would raise the floor
+                // rather than tidy the code.
+                //
+                // The shape also matters here beyond the lint: this
+                // is the second of two identical checks either side
+                // of the subscribe, and both must keep returning on
+                // the same condition — a newer sequence than the
+                // caller has already seen.
+                #[allow(clippy::collapsible_if)]
                 if let Some(frame) = state.latest.as_ref() {
                     if frame.seq > since {
                         return Some(frame.clone());

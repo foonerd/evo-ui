@@ -46,6 +46,7 @@ import {
 import type { TextOverflowMode } from "../../components/ScrollingText";
 import { useLibrary } from "./useLibrary";
 import { FacetTile } from "./FacetTile";
+import { useArtworkResolvedSubscription } from "./artwork-resolved";
 import { applyArtworkSize, readArtworkSize } from "./artwork-size";
 import { useAudioQueue } from "../queue/useAudioQueue";
 import type {
@@ -139,6 +140,9 @@ export function LibrarySurface({
   onTextModeOverrideChange
 }: LibrarySurfaceProps) {
   useLocale();
+  // Step B: one shared artwork_resolved subscription for the whole browse
+  // surface; tiles react to their own key and swap glyph -> image in place.
+  useArtworkResolvedSubscription();
   const library = useLibrary();
   const audioQueue = useAudioQueue();
   const fav = useFavourites();
@@ -521,8 +525,9 @@ export function LibrarySurface({
 
   // Folder-level queue actions for a DLNA MediaServer container. A
   // network container has no MPD folder substrate, so it can't use the
-  // `folder` Criteria path above; it resolves server-side page by page
-  // via enqueueContainer. entry.uri is the container's stable dlna: id.
+  // `folder` Criteria path above; enqueueContainer issues one
+  // enqueue_selection and surfaces an empty folder as feedback.
+  // entry.uri is the container's stable dlna: id.
   const onDlnaContainerQueue = useCallback(
     (entry: LibraryEntry, mode: QueueMode) => {
       if (entry.kind !== "directory") return;

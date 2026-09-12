@@ -11,10 +11,10 @@ import { KeyRound, Plus, ShieldAlert, Trash2, UserRound } from "lucide-preact";
 import { Modal, ConfirmDialog } from "../../components/dialogs";
 import { PasswordField } from "../../components/PasswordField";
 import { PairDeviceFlow } from "../pairing/PairDeviceFlow";
+import { isPairRequired, isHouseholdLocked } from "../../runtime/authz-classify";
 import { reauthPromptResponder } from "../prompts/usePromptResponder";
 import { tryUseFrameworkTransport } from "../../runtime/framework-transport";
 import { credentialPut } from "../credentials/credential-ops";
-import { hasNetworkAdmin } from "./useNetworkShares";
 import { useSmbServer, extraShareToWire } from "./useSmbServer";
 import { friendlyVerbError } from "./friendly-error";
 import { t } from "../../runtime/i18n";
@@ -33,22 +33,16 @@ function isValidHostname(name: string): boolean {
   return /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(name);
 }
 
-function isAuthRefusal(r: { message?: string; subclass?: string }): boolean {
-  if (r.subclass === "step_up_required" || r.subclass === "pair_expired") return true;
-  return /step.?up|scope|permission|denied|unauthori|not.?hold|network_admin|pair/i.test(
-    r.message ?? ""
-  );
-}
-
 export function SmbServerSurface() {
   useLocale();
   const smb = useSmbServer();
   const fwTransport = tryUseFrameworkTransport();
-  const admin = hasNetworkAdmin();
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [pairOpen, setPairOpen] = useState(false);
   const [authRefused, setAuthRefused] = useState(false);
+  // household_policy_locked refusal (a group is protected at the current
+  // level). Shows the household notice + door - PASS, not Pair.
   const [addOpen, setAddOpen] = useState(false);
   const [revoking, setRevoking] = useState<string | null>(null);
   const [resetting, setResetting] = useState<
@@ -76,7 +70,9 @@ export function SmbServerSurface() {
     setTimedOut(false);
     smb.reauth();
   };
-  const showAuthNotice = !admin || authRefused;
+  // Pair is offered ONLY on a genuine pair-ceremony refusal, never
+  // pre-flighted from bearer scope (household model: LAN-trust dispatch).
+  const showAuthNotice = authRefused;
 
   const run = async (
     op: () => Promise<{ ok: boolean; message?: string; subclass?: string }>
@@ -87,10 +83,13 @@ export function SmbServerSurface() {
     const r = await op();
     setBusy(false);
     if (!r.ok) {
-      if (isAuthRefusal(r)) {
+      if (isPairRequired(r)) {
         // Elevation is handled by the pair notice - never surface a raw
         // scope/permission chain as a scary error line.
         setAuthRefused(true);
+        setFeedback("");
+      } else if (isHouseholdLocked(r)) {
+        setAuthRefused(false);
         setFeedback("");
       } else {
         setFeedback(friendlyVerbError(r.message));
@@ -154,8 +153,13 @@ export function SmbServerSurface() {
     const r = await smb.addUser(username, key, mappedDomain);
     setBusy(false);
     if (!r.ok) {
-      if (isAuthRefusal(r)) setAuthRefused(true);
-      else setFeedback(friendlyVerbError(r.message));
+      if (isPairRequired(r)) {
+        setAuthRefused(true);
+      } else if (isHouseholdLocked(r)) {
+        setAuthRefused(false);
+      } else {
+        setFeedback(friendlyVerbError(r.message));
+      }
     } else {
       setAuthRefused(false);
     }
@@ -180,8 +184,13 @@ export function SmbServerSurface() {
     });
     setBusy(false);
     if (!r.ok) {
-      if (isAuthRefusal(r)) setAuthRefused(true);
-      else setFeedback(friendlyVerbError(r.message));
+      if (isPairRequired(r)) {
+        setAuthRefused(true);
+      } else if (isHouseholdLocked(r)) {
+        setAuthRefused(false);
+      } else {
+        setFeedback(friendlyVerbError(r.message));
+      }
     } else {
       setAuthRefused(false);
       setHostnameEdit(null);
@@ -217,7 +226,12 @@ export function SmbServerSurface() {
       ) : null}
 
       {state === null ? (
-        timedOut ? (
+        // Only declare "unavailable" once the grace has elapsed AND we
+        // are no longer actively connecting. A stale-bearer recovery
+        // spends its whole bearer-exhaust + anonymous re-probe in
+        // "connecting", so gating on kind keeps the honest loading state
+        // instead of flashing unavailable before the read self-heals.
+        timedOut && smb.connection.kind !== "connecting" ? (
           <div className="sources-empty">
             <p>{t("smb.unavailable")}</p>
             <button
@@ -311,7 +325,10 @@ export function SmbServerSurface() {
             </button>
           </div>
           {state.users.length === 0 ? (
-            <p className="sources-empty">{t("smb.noUsers")}</p>
+            // Stock + delivery shares are authenticated (guest ok = no): an
+            // enabled server with no SMB user exports nothing reachable. Say
+            // so here, on entry - not after a failed guest drop.
+            <p className="sources-empty">{t(state.enabled ? "smb.noUsersEnabled" : "smb.noUsers")}</p>
           ) : (
             <ul className="sources-activity">
               {state.users.map((u) => (

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { WsTransport } from "../../runtime/ws-transport";
 import { frameworkWsUrl, tryUseFrameworkTransport } from "../../runtime/framework-transport";
 import { storedBearer } from "../../runtime/bearer";
+import { isPairRequired, isHouseholdLocked } from "../../runtime/authz-classify";
+import { nextAuthNeeded } from "./network-auth-state";
 import { pluginRequest } from "../../runtime/plugin-request-codec";
 import { t } from "../../runtime/i18n";
 import {
@@ -28,17 +30,30 @@ const SHELF = "networking.link";
 
 export type NetworkLinkVerbResult<T> =
   | { ok: true; value: T }
-  | { ok: false; message: string };
+  // `authNeeded` is set ONLY when the shared classifier says Pair, and
+  // under the household model that is the pair ceremony ALONE
+  // (pair_expired / pair_unknown / pair_wrong_code). A capability-scope
+  // miss is now PASS (these verbs are admitted on LAN-trust, gated by the
+  // household policy), household_policy_locked is PASS (the lend/level
+  // lock, surfaced by the household banner), and step_up_required is the
+  // password card - none of them raise Pair. Everything else stays an
+  // honest fault.
+  | {
+      ok: false;
+      message: string;
+      authNeeded?: boolean;
+      /** The refusal was household_policy_locked - the gate, never an
+       *  error paint and never Pair. */
+      householdLocked?: boolean;
+    };
 
 export function useNetworkLink() {
-  // Network settings verbs are bearer-gated (write/step-up:network_admin).
-  // They MUST ride a bearer-scoped socket seeded with the paired operator
-  // bearer - NOT the shared anonymous framework transport, which carries
-  // no credential and would refuse every mutation regardless of pairing.
-  // (This mirrors useNetworkShares, which was already bearer-scoped.)
-  // `socketGen` lets reauth() rebuild the socket with a freshly stored
-  // bearer (after inline pairing) WITHOUT a full-page reload - so the
-  // operator stays on the network page instead of bouncing to home.
+  // Mutations keep this private socket so reauth() can rebuild it
+  // with a stored bearer after an API/headless pair, without a
+  // full-page reload. They are admitted on LAN-trust when unpaired
+  // — do not pre-flight Pair on a missing bearer. Do not move them
+  // onto the shared transport in this sitting (transport-unify is
+  // a later row). Reads stay on the shared anonymous socket below.
   const [socketGen, setSocketGen] = useState(0);
   const transportRef = useRef<WsTransport | null>(null);
   if (transportRef.current === null && typeof WebSocket !== "undefined") {
@@ -68,12 +83,6 @@ export function useNetworkLink() {
       if (tr !== null) void tr.close();
     };
   }, []);
-  const reauth = useCallback(() => {
-    const tr = transportRef.current;
-    transportRef.current = null;
-    if (tr !== null) void tr.close();
-    setSocketGen((g) => g + 1);
-  }, []);
   const [intent, setIntent] = useState<NetworkIntent>(emptyIntent);
   const [scanRows, setScanRows] = useState<ScanApRow[]>([]);
   const [scanDropped, setScanDropped] = useState<BandGateDrop | null>(null);
@@ -85,6 +94,31 @@ export function useNetworkLink() {
     useState<NetworkReachability | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // True ONLY when classifyAuthz says pair - the pair ceremony alone
+  // (pair_expired / pair_unknown / pair_wrong_code). The surface maps this
+  // to "pair to manage". A scope miss, a household lock, and
+  // step_up_required are NOT this flag.
+  const [authNeeded, setAuthNeeded] = useState(false);
+  // True when a dispatch was refused with household_policy_locked (a group
+  // is protected at the current level). It is PASS, not Pair. Settings
+  // entry is the two-door gate; this flag must not paint 403.
+  const [householdLocked, setHouseholdLocked] = useState(false);
+
+  // Rebuild the bearer socket after inline pairing WITHOUT a full-page reload
+  // AND clear the pair prompt + last error in place. Without the clears the
+  // "isn't paired for network management" notice sticks after
+  // pair_authenticate succeeds - the operator paired but the surface stayed
+  // dead. storedBearer() is set by the pair flow before onPaired -> reauth()
+  // runs, so the rebuilt socket carries the fresh bearer; a later refused
+  // mutation re-raises authNeeded honestly.
+  const reauth = useCallback(() => {
+    const tr = transportRef.current;
+    transportRef.current = null;
+    if (tr !== null) void tr.close();
+    setAuthNeeded(nextAuthNeeded({ kind: "reauth" }));
+    setError(null);
+    setSocketGen((g) => g + 1);
+  }, []);
 
   const request = useCallback(
     async (
@@ -92,8 +126,19 @@ export function useNetworkLink() {
       payload: Record<string, unknown> = {}
     ): Promise<NetworkLinkVerbResult<unknown>> => {
       if (transport === null) {
+        setAuthNeeded(false);
+        setHouseholdLocked(false);
         return { ok: false, message: t("library.notConnected") };
       }
+      // Household model: these verbs are admitted on LAN-trust and gated by
+      // the household policy, NOT by pairing - so we do NOT pre-flight Pair
+      // on a missing bearer. We dispatch (the socket is anonymous LAN-trust
+      // when unpaired) and let the ONE classifier route any refusal:
+      //   pair ceremony    -> Pair (authNeeded, below);
+      //   step_up_required -> the operator-password card (transport.dispatch
+      //                       funnels it and retries with the token);
+      //   household lock / scope miss / anything else -> honest, no Pair.
+      // This retires the E3-lite "no bearer -> raise Pair" pre-flight.
       const result = await pluginRequest(
         transport,
         SHELF,
@@ -101,11 +146,18 @@ export function useNetworkLink() {
         payload
       );
       if (result.error !== undefined) {
+        const isAuth = isPairRequired(result.error);
+        const locked = isHouseholdLocked(result.error);
+        setAuthNeeded(nextAuthNeeded({ kind: "verb_result", pairRequired: isAuth }));
+        setHouseholdLocked(locked);
         return {
           ok: false,
-          message: result.error.message ?? result.error.code
+          message: result.error.message ?? result.error.code,
+          authNeeded: isAuth
         };
       }
+      setAuthNeeded(false);
+      setHouseholdLocked(false);
       return { ok: true, value: result.value };
     },
     [transport]
@@ -125,9 +177,14 @@ export function useNetworkLink() {
       }
       const result = await pluginRequest(tr, SHELF, requestType, payload);
       if (result.error !== undefined) {
+        // Carry the classification so a refused read can be surfaced the
+        // same way a refused verb is: pair -> the Pair CTA; household lock
+        // -> the gate (never an error paint); anything else -> honest fault.
         return {
           ok: false,
-          message: result.error.message ?? result.error.code
+          message: result.error.message ?? result.error.code,
+          authNeeded: isPairRequired(result.error),
+          householdLocked: isHouseholdLocked(result.error)
         };
       }
       return { ok: true, value: result.value };
@@ -164,6 +221,18 @@ export function useNetworkLink() {
       // reachability verdict + carrier observations). Decode the table
       // here so the tiles reflect real interface state.
       if (statusR.ok) setDeviceTable(decodeDeviceTable(statusR.value));
+      else if (statusR.authNeeded) {
+        // The classifier said pair: raise the existing Pair CTA (authNeeded
+        // is pair only). The tiles' grace bound paints it past 8s.
+        setAuthNeeded(true);
+      } else if (!quiet && !statusR.householdLocked) {
+        // A refused / failed status read on the operator-initiated refresh
+        // surfaces like the intent read does - never silently, or the tiles
+        // would say "Checking" forever. A household lock is the gate, never
+        // link.error. Quiet polls stay quiet; when nm.status answers, the
+        // table fills and the tiles paint real state.
+        setError(statusR.message);
+      }
       if (intentR.ok) {
         const decoded = decodeIntent(intentR.value);
         if (decoded !== null) setIntent(decoded);
@@ -455,6 +524,8 @@ export function useNetworkLink() {
     reachability,
     busy,
     error,
+    authNeeded,
+    householdLocked,
     refresh,
     reauth,
     scan,

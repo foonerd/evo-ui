@@ -1,11 +1,16 @@
-// Bridge to the kiosk browser's native message handlers (WPE WebKit).
-// These exist ONLY inside the on-device kiosk browser; a paired laptop or
-// phone has no window.webkit handlers, so every entry point here is a
-// safe no-op off-device and the whole Display & Touch panel is hidden via
-// inKioskBrowser(). Handlers are fire-and-forget (postMessage on an
-// unregistered handler is silently dropped, so shipping the UI ahead of
-// the kiosk-browser rollout is safe). The calibration wizard's result is
-// delivered back only as a DOM event, never a return value.
+// Glass detection for the kiosk browser (WPE WebKit).
+//
+// This module used to be the write bridge: it posted to the kiosk
+// browser's native message handlers, which apply display rotation and
+// touch calibration in-process. Those writes reach the same overlay files
+// the system.kiosk plugin verbs write, through the same evo-kiosk-config
+// crate - but in-process means they never pass the framework dispatcher,
+// so no capability gate and no household policy could refuse them. Every
+// one of them has moved onto the verbs; what is left here is detection.
+//
+// window.webkit handlers exist ONLY inside the on-device kiosk browser, so
+// their presence is a reliable "am I the glass" signal, and their absence
+// off-device is why this whole module is inert in a paired browser.
 
 export type Rotation = "0" | "90" | "180" | "270";
 
@@ -16,21 +21,15 @@ export interface CalibrationSample {
   actual_y: number;
 }
 
-export interface DerivedCalibration {
-  ok: boolean;
-  rotation: Rotation;
-  hflip: boolean;
-  vflip: boolean;
-  mean_error: number;
-}
-
 interface Handler {
   postMessage: (message: string) => void;
 }
 interface KioskHandlers {
+  /// Read as a PRESENCE PROBE only - never posted to. Its presence is
+  /// what distinguishes the on-device kiosk browser from any other
+  /// browser; the browser registers others too, and this module
+  /// deliberately does not name them.
   evo_set_display_rotation?: Handler;
-  evo_set_touch_calibration?: Handler;
-  evo_sample_touch_calibration_from_corners?: Handler;
 }
 
 function handlers(): KioskHandlers | undefined {
@@ -68,48 +67,25 @@ export function inKioskBrowser(): boolean {
   return true;
 }
 
-/** Persist + apply display orientation. Fire-and-forget: the display
- *  physically rotating (~1s) is the only confirmation. */
-export function setDisplayRotation(rotation: Rotation): void {
-  handlers()?.evo_set_display_rotation?.postMessage(rotation);
-}
+// No display-rotation writer lives here any more. It used to postMessage
+// evo_set_display_rotation, which reaches evo_kiosk_config::set_display_rotation
+// inside the kiosk-browser process - the same overlay the plugin verb writes,
+// but without passing the framework dispatcher, so no capability or household
+// gate could refuse it. Display & Touch now dispatches the system.kiosk verb
+// from the glass exactly as from a remote browser. The handler is still
+// registered by the browser (see evo-kiosk-eng); this module simply does not
+// offer the UI a way back onto it.
 
-/** Batched touch calibration: all three fields in one call. Idempotent. */
-export function setTouchCalibration(
-  rotation: Rotation,
-  hflip: boolean,
-  vflip: boolean
-): void {
-  handlers()?.evo_set_touch_calibration?.postMessage(
-    JSON.stringify({ rotation, hflip, vflip })
-  );
-}
-
-/** Submit four normalised corner samples; resolves with the native-derived
- *  calibration via the `evo:touch-calibration-derived` DOM event (5s
- *  timeout). Samples MUST be captured with calibration reset to identity. */
-export function sampleTouchFromCorners(
-  samples: CalibrationSample[]
-): Promise<DerivedCalibration> {
-  return new Promise((resolve, reject) => {
-    const h = handlers();
-    if (h?.evo_sample_touch_calibration_from_corners === undefined) {
-      reject(new Error("kiosk handler unavailable"));
-      return;
-    }
-    const timeout = setTimeout(() => {
-      window.removeEventListener("evo:touch-calibration-derived", onDerived);
-      reject(new Error("wizard timeout"));
-    }, 5000);
-    const onDerived = (ev: Event): void => {
-      clearTimeout(timeout);
-      resolve((ev as CustomEvent<DerivedCalibration>).detail);
-    };
-    window.addEventListener("evo:touch-calibration-derived", onDerived, {
-      once: true
-    });
-    h.evo_sample_touch_calibration_from_corners.postMessage(
-      JSON.stringify({ samples })
-    );
-  });
-}
+// No touch writers live here any more either. The wizard's reset and its
+// derive both go over the system.kiosk verbs now, so this module offers
+// the UI no ungated write of any kind - what remains is the glass/remote
+// probe below and nothing else.
+//
+// The kiosk-browser dropped the two touch script-message handlers
+// (evo_set_touch_calibration, evo_sample_touch_calibration_from_corners); its
+// current binary registers only evo_set_display_rotation, and that slot is a
+// PRESENCE PROBE, not a writer this module posts to. Glass and VM now run that
+// binary (evo-kiosk-eng 75796d9). The NUC was not overlaid, and testers on
+// Latest still have the old piece (all three handlers) until a remint is named.
+// Either way no evo UI code reaches for any of them, so which handlers a given
+// binary honours is a kiosk-eng matter, not this module's.

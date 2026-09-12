@@ -210,6 +210,49 @@ export function decodeSkipOutcome(raw: unknown): SkipOutcome | null {
   return null;
 }
 
+/**
+ * Outcome of `queue.enqueue_selection` for a DLNA container.
+ * Device `handle_enqueue_selection_container` always resolves the
+ * subtree in one call (`next_page` is null). Empty means the queue
+ * was not written.
+ */
+export type EnqueueSelectionOutcome =
+  | {
+      status: "empty";
+      enqueuedCount: 0;
+      truncated: boolean;
+      detail: string | null;
+    }
+  | {
+      status: "ok";
+      enqueuedCount: number;
+      truncated: boolean;
+    };
+
+/** Decode the container / criteria enqueue_selection envelope.
+ *  Returns null on shape failure so the caller can refuse instead
+ *  of treating a garbled body as a successful enqueue. */
+export function decodeEnqueueSelectionOutcome(
+  v: unknown
+): EnqueueSelectionOutcome | null {
+  if (!isObject(v)) return null;
+  const status = v["status"];
+  if (status !== "empty" && status !== "ok") return null;
+  const count = intRequired(v, "enqueued_count") ?? intRequired(v, "enqueued");
+  if (count === null || count < 0) return null;
+  const truncated = boolOr(v, "truncated", false);
+  if (status === "empty") {
+    if (count !== 0) return null;
+    return {
+      status: "empty",
+      enqueuedCount: 0,
+      truncated,
+      detail: stringOrNull(v, "detail")
+    };
+  }
+  return { status: "ok", enqueuedCount: count, truncated };
+}
+
 /** Format a duration_ms field as "m:ss" or "h:mm:ss". Returns "-"
  *  when null so the UI's duration column never shows raw nulls. */
 export function formatDurationMs(ms: number | null): string {

@@ -26,12 +26,9 @@ import {
 import type { ComponentChildren } from "preact";
 import { t } from "../../runtime/i18n";
 import { KebabMenu, type KebabMenuItem } from "../../components/KebabMenu";
-import { tryUseFrameworkTransport } from "../../runtime/framework-transport";
-import { pluginRequest } from "../../runtime/plugin-request-codec";
-import { applyArtworkSize, readArtworkSize } from "./artwork-size";
+import { applyArtworkSize, clearArtwork, readArtworkSize } from "./artwork-size";
+import { useArtworkResolvedTick } from "./artwork-resolved";
 import type { FacetEntry, FacetKind } from "./library-decoders";
-
-const ARTWORK_SHELF = "artwork.providers";
 
 export type QueueMode = "now" | "next" | "append";
 
@@ -39,13 +36,6 @@ interface ClearTarget {
   verb: string;
   target: { scheme: string; value: string };
 }
-
-function hideBrokenImg(e: Event): void {
-  (e.currentTarget as HTMLImageElement).style.display = "none";
-}
-
-/// Bounded lazy retry for artist portraits only (transient upstream).
-const ARTIST_RETRY_DELAYS_MS = [4000, 10000, 25000];
 
 interface FacetTileProps {
   facet: FacetKind;
@@ -118,7 +108,6 @@ export function FacetTile(props: FacetTileProps) {
           verb: "artwork.online.clear_cache",
           target: { scheme: "artist-name", value: entry.value }
         }}
-        artistFallback
       />
     );
   }
@@ -184,7 +173,6 @@ function CoverFacetTile({
   glyph,
   sub,
   clearTarget,
-  artistFallback = false,
   onQueue,
   onSave
 }: FacetTileProps & {
@@ -193,106 +181,90 @@ function CoverFacetTile({
   glyph: ComponentChildren;
   sub?: string;
   clearTarget: ClearTarget;
-  artistFallback?: boolean;
 }) {
-  const transport = tryUseFrameworkTransport();
   const [nonce, setNonce] = useState(0);
-  const [retry, setRetry] = useState(0);
-  const [fallbackSrc, setFallbackSrc] = useState<string | null>(null);
   const [cleared, setCleared] = useState(false);
-  const triedFallback = useRef(false);
-  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(
-    () => () => {
-      if (retryTimer.current !== null) clearTimeout(retryTimer.current);
-    },
-    []
-  );
+  // Broken is managed in state (not by mutating the img's style) so that
+  // changing src - via Refresh or a landing after Clear - always gets a
+  // fresh load attempt. Mutating style.display made a recovered image
+  // stay invisible, which is why Refresh appeared to do nothing.
+  const [broken, setBroken] = useState(false);
+  // Monotonic cache-bust for a plain re-request when a resolve lands
+  // (Step B). Distinct from `nonce` (manual Refresh), which forces a
+  // forget via refresh=1; a landing re-request must NOT forget.
+  const [reloadTick, setReloadTick] = useState(0);
 
   const base =
     entry.coverUrl !== null
       ? applyArtworkSize(entry.coverUrl, readArtworkSize())
       : null;
-  const bust =
-    nonce > 0 ? `refresh=1&_r=m${nonce}` : retry > 0 ? `_r=r${retry}` : null;
+  // Manual Refresh forces a forget + re-resolve (refresh=1). A resolve
+  // landing (Step B) only needs a fresh load attempt, NOT a forget - so it
+  // adds a distinct cache-bust (_t) that re-requests without evicting.
+  const bustParts: string[] = [];
+  if (nonce > 0) bustParts.push(`refresh=1&_r=m${nonce}`);
+  if (reloadTick > 0) bustParts.push(`_t=${reloadTick}`);
   const primary =
     base === null
       ? null
-      : bust === null
+      : bustParts.length === 0
         ? base
-        : `${base}${base.includes("?") ? "&" : "?"}${bust}`;
-  const src = cleared ? null : (fallbackSrc ?? primary);
+        : `${base}${base.includes("?") ? "&" : "?"}${bustParts.join("&")}`;
+  // Paint ONLY the validated serve path (the byte endpoint). There is no
+  // second paint path: the tile never renders a raw provider URL from the
+  // resolve verb (that was the UI half of the two-winner-path divergence -
+  // it repainted the exact silhouette the serve path rejected). When the
+  // serve path has no validated image the tile shows the glyph, so a
+  // placeholder/rejected result reads as an honest blank.
+  const src = cleared ? null : primary;
 
-  const scheduleRetry = (): void => {
-    if (!artistFallback || cleared) return;
-    if (retry >= ARTIST_RETRY_DELAYS_MS.length) return;
-    if (retryTimer.current !== null) return;
-    const delay = ARTIST_RETRY_DELAYS_MS[retry];
-    retryTimer.current = setTimeout(() => {
-      retryTimer.current = null;
-      triedFallback.current = false;
-      setFallbackSrc(null);
-      setRetry((n) => n + 1);
-    }, delay);
+  // Any src change (Refresh, the fallback landing, Clear-then-Refresh) is a
+  // fresh load attempt, so clear the broken flag and let the new URL try.
+  useEffect(() => {
+    setBroken(false);
+  }, [src]);
+
+  // A failed load shows the glyph immediately (never a broken-image mark)
+  // and STAYS a glyph. The tile does not retry, classify, or re-fetch on
+  // its own - a transient failure is not chased here, which is what
+  // prevents a per-tile resolve storm and the repaint loop. The tile waits
+  // for the resolve-landed signal (Step B) to bump the tick and re-request.
+  // It never paints a raw provider URL, only the validated byte endpoint.
+  const onImgError = (): void => {
+    setBroken(true);
   };
 
-  const onImgError = (e: Event): void => {
-    if (
-      artistFallback &&
-      transport !== null &&
-      fallbackSrc === null &&
-      !triedFallback.current
-    ) {
-      triedFallback.current = true;
-      void (async () => {
-        const r = await pluginRequest(
-          transport,
-          ARTWORK_SHELF,
-          "artwork.resolve_artist_artwork",
-          { v: 1, artist: entry.value }
-        );
-        const url =
-          r.error === undefined &&
-          r.value !== null &&
-          typeof r.value === "object"
-            ? (r.value as Record<string, unknown>)["image_url"]
-            : null;
-        if (typeof url === "string" && url.length > 0) setFallbackSrc(url);
-        else scheduleRetry();
-      })();
-      return;
-    }
-    hideBrokenImg(e);
-    scheduleRetry();
-  };
+  // Step B: a resolve landed for this subject on the bus. Lift the
+  // operator-cleared blank and any failed-load glyph, then re-request
+  // the byte URL in place. Clear latches `cleared` so the old image
+  // cannot flash back; a landing is the new image, so that latch drops
+  // here. Refresh is not required. Only acts on a real bump.
+  const resolvedTick = useArtworkResolvedTick(entry.coverUrl);
+  const prevResolvedTick = useRef(resolvedTick);
+  useEffect(() => {
+    if (resolvedTick === prevResolvedTick.current) return;
+    prevResolvedTick.current = resolvedTick;
+    setCleared(false);
+    setBroken(false);
+    setReloadTick((r) => r + 1);
+  }, [resolvedTick]);
 
   const refresh = (): void => {
-    if (retryTimer.current !== null) {
-      clearTimeout(retryTimer.current);
-      retryTimer.current = null;
-    }
-    triedFallback.current = false;
-    setFallbackSrc(null);
+    setBroken(false);
     setCleared(false);
-    setRetry(0);
     setNonce((n) => n + 1);
   };
 
   const clear = (): void => {
-    if (retryTimer.current !== null) {
-      clearTimeout(retryTimer.current);
-      retryTimer.current = null;
-    }
-    if (transport !== null) {
-      void pluginRequest(transport, ARTWORK_SHELF, clearTarget.verb, {
-        v: 1,
-        target: clearTarget.target
-      });
-    }
-    triedFallback.current = false;
-    setFallbackSrc(null);
-    setCleared(true);
+    // Targeted eviction via the one authenticated destructive gesture:
+    // DELETE removes this subject's resolve-index entry, asset bytes and
+    // plugin memo across all tiers at once. Blank the tile ONLY on a real
+    // success - a capability refusal must not leave a glyph implying the
+    // image was cleared when it was not.
+    void (async (): Promise<void> => {
+      const r = await clearArtwork(clearTarget.target);
+      if (r.ok) setCleared(true);
+    })();
   };
 
   // Kebab: universal queue actions on top, then artwork maintenance
@@ -329,8 +301,8 @@ function CoverFacetTile({
           }
         >
           {glyph}
-          {src !== null ? (
-            <img src={src} alt="" loading="lazy" onError={onImgError} />
+          {src !== null && !broken ? (
+            <img key={src} src={src} alt="" loading="lazy" onError={onImgError} />
           ) : null}
         </span>
         <span className="facet-tile-text">

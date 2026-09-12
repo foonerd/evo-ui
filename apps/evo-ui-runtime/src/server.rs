@@ -258,6 +258,18 @@ async fn settings_patch(req: Request<Incoming>, state: Arc<ServerState>) -> Resp
             Ok(g) => g,
             Err(_) => return server_error("settings lock poisoned"),
         };
+        // Nested on purpose. Collapsing these two conditions needs a
+        // let-chain, and let-chains are Rust 1.88; this crate's floor
+        // is 1.85, where they refuse outright. The nesting was written
+        // by the change that removed the let-chains for exactly that
+        // reason, and re-collapsing it would raise the floor rather
+        // than tidy the code.
+        //
+        // The condition itself is the optimistic-concurrency check:
+        // a patch that names a base revision is refused when it is
+        // not the current one, and a patch that names none is not
+        // checked at all. Both halves must keep that shape.
+        #[allow(clippy::collapsible_if)]
         if let Some(base) = patch.base_revision {
             if base != guard.revision {
                 return json_response(

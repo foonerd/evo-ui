@@ -11,7 +11,8 @@
 import type { WireOpResult } from "../../sdk/types";
 import {
   decodeProviderListing,
-  type ProviderListing
+  type ProviderListing,
+  type PrivacyMode
 } from "./provider-decoders.ts";
 
 /** Minimal transport surface these senders need (WsTransport satisfies
@@ -76,6 +77,21 @@ export async function providersSetEnabled(
   const r = await d.dispatch("online_providers_set_enabled", {
     provider_id: providerId,
     enabled
+  });
+  if (r.error !== undefined) return toFailure(r.error);
+  return { ok: true, value: null };
+}
+
+/** Set the device-wide privacy posture (write:online_providers).
+ *  Hot-applies via the change bus; both the text and artwork cascades
+ *  read the one shared posture, so it takes effect on the next verb
+ *  with no restart. */
+export async function providersSetPrivacyMode(
+  d: ProviderDispatcher,
+  privacyMode: PrivacyMode
+): Promise<ProviderOpResult<null>> {
+  const r = await d.dispatch("online_providers_set_privacy_mode", {
+    privacy_mode: privacyMode
   });
   if (r.error !== undefined) return toFailure(r.error);
   return { ok: true, value: null };

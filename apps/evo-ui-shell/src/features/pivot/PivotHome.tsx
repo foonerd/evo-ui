@@ -11,6 +11,7 @@ import {
   ListOrdered,
   Moon,
   Music,
+  Plane,
   Power,
   RotateCcw,
   Speaker,
@@ -230,6 +231,22 @@ function PivotDeviceReveal({
           <RotateCcw size={18} />
           <span>{t("app.reboot")}</span>
         </button>
+        {power.flightAvailable ? (
+          <button
+            type="button"
+            className={
+              "pivot-tile" + (power.flightEnabled ? " pivot-tile-on" : "")
+            }
+            aria-pressed={power.flightEnabled}
+            title={t("app.flightMode")}
+            onClick={() =>
+              power.setConfirm(power.flightEnabled ? "flight_off" : "flight_on")
+            }
+          >
+            <Plane size={18} />
+            <span>{t("app.flightMode")}</span>
+          </button>
+        ) : null}
         <button
           type="button"
           className="pivot-tile pivot-tile-pending"

@@ -15,18 +15,29 @@
 import { useEffect, useState } from "preact/hooks";
 import { AttentionOverlay } from "../../components/AttentionLayer";
 import { StepUpConfirm } from "../../components/StepUpConfirm";
-import { Power, RotateCcw } from "lucide-preact";
+import { Plane, Power, RotateCcw } from "lucide-preact";
 import { useSystemPower } from "./useSystemPower";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 
-/** Which power verb a confirmation is currently gating. */
-export type SystemPowerConfirmKind = "reboot" | "power_off";
+/** Which device verb a confirmation is currently gating.
+ *  `flight_on` / `flight_off` toggle the network radios; the rest are
+ *  the fire-and-shutdown power verbs. */
+export type SystemPowerConfirmKind =
+  | "reboot"
+  | "power_off"
+  | "flight_on"
+  | "flight_off";
 
 export interface SystemPowerConfirmState {
   /** True only when a system.power plugin is admitted - the gate the
-   *  trigger buttons hide behind. */
+   *  reboot/power-off buttons hide behind. */
   available: boolean;
+  /** True only when the device answers the flight-mode read - the gate
+   *  the Flight-mode toggle hides behind. */
+  flightAvailable: boolean;
+  /** Current Flight mode (radios suspended). */
+  flightEnabled: boolean;
   /** The verb currently being confirmed, or null when no modal. */
   confirm: SystemPowerConfirmKind | null;
   /** Open the confirmation modal for a verb. */
@@ -92,6 +103,18 @@ export function useSystemPowerConfirm(): SystemPowerConfirmState {
     if (confirm === null) return;
     setError(null);
     setBusy(true);
+    if (confirm === "flight_on" || confirm === "flight_off") {
+      // Flight mode is a reversible radio toggle - no host teardown,
+      // no reconnect poll. Apply, then dismiss on success.
+      const res = await power.setFlight(confirm === "flight_on");
+      setBusy(false);
+      if (res.ok) {
+        closeConfirm();
+      } else {
+        setError(res.message ?? t("power.flightFailed"));
+      }
+      return;
+    }
     const outcome =
       confirm === "reboot" ? await power.reboot() : await power.powerOff();
     if (outcome.kind === "accepted") {
@@ -112,6 +135,8 @@ export function useSystemPowerConfirm(): SystemPowerConfirmState {
 
   return {
     available: power.available,
+    flightAvailable: power.flightAvailable,
+    flightEnabled: power.flightEnabled,
     confirm,
     setConfirm,
     busy,
@@ -177,6 +202,33 @@ export function SystemPowerConfirmModal({
           ) : null}
         </div>
       </AttentionOverlay>
+    );
+  }
+  // Flight mode is a reversible radio toggle - same confirm overlay as
+  // the power verbs, Plane icon + network copy, danger only when turning
+  // radios OFF (the operator may drop their own Wi-Fi session).
+  if (confirm === "flight_on" || confirm === "flight_off") {
+    const on = confirm === "flight_on";
+    return (
+      <StepUpConfirm
+        icon={<Plane size={22} />}
+        danger={on}
+        title={on ? t("power.flightOnTitle") : t("power.flightOffTitle")}
+        body={on ? t("power.flightOnBody") : t("power.flightOffBody")}
+        error={error}
+        busy={busy}
+        confirmLabel={
+          busy
+            ? t("power.working")
+            : on
+              ? t("power.flightOnNow")
+              : t("power.flightOffNow")
+        }
+        confirmIcon={<Plane size={14} />}
+        ariaLabel={t("power.flightAria")}
+        onCancel={onCancel}
+        onConfirm={onConfirm}
+      />
     );
   }
   // The confirm view is the FIRST consumer of the generalised

@@ -36,6 +36,7 @@ import { useFavourites } from "../favourites/useFavourites";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 import { rangeFill } from "../../runtime/range-fill";
+import { CoverImg } from "../../components/CoverImg";
 import { Visualizer } from "./Visualizer";
 import { ImmersiveVisualizer } from "./ImmersiveVisualizer";
 import { ImmersiveArtwork } from "./ImmersiveArtwork";
@@ -92,7 +93,10 @@ export function StageSurface(props: StageSurfaceProps) {
   const artistImageUrl = useArtistImage(artZoom ? track?.artist ?? null : null);
   // One track_detail read per stage - passed into every meta atom so a
   // stage with several of them issues a single fetch.
-  const { detail, phase: detailPhase } = useTrackDetail(track?.mpdPath ?? null);
+  const { detail, phase: detailPhase } = useTrackDetail(
+    "mpd-path",
+    track?.mpdPath ?? null
+  );
   const detailLoading = detailPhase === "loading";
   // Stage meta atoms route the "add a key" CTA to the credentials screen
   // via an app-level event (App listens), mirroring the menu-toggle path.
@@ -236,18 +240,11 @@ export function StageSurface(props: StageSurfaceProps) {
                   : undefined
               }
             >
-              {track?.artworkUrl ? (
-                <img
-                  class="playback-hero-art-img"
-                  src={track.artworkUrl}
-                  alt=""
-                  onError={(e) => {
-                    (e.currentTarget as HTMLImageElement).style.display = "none";
-                  }}
-                />
-              ) : (
-                <HeartbeatMark />
-              )}
+              <CoverImg
+                className="playback-hero-art-img"
+                src={track?.artworkUrl ?? null}
+                fallback={<HeartbeatMark />}
+              />
             </div>
             {artZoom && track?.artworkUrl ? (
               <ImmersiveArtwork

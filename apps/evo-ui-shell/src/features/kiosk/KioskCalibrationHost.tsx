@@ -15,8 +15,10 @@
 // remote operator can still recalibrate via the advanced touch controls,
 // which drive set_touch_calibration directly.)
 //
-// Mirrors the window-event contract already used for the derived-result
-// hand-back (evo:touch-calibration-derived in kiosk-bridge.ts).
+// This launch event is now the ONLY window-event contract the UI keeps
+// with the kiosk browser. The derived-result hand-back it used to mirror
+// (evo:touch-calibration-derived) is gone: the wizard's derive is a gated
+// verb whose result comes back in the response, not over a DOM event.
 
 import { useEffect, useState } from "preact/hooks";
 import type { JSX } from "preact";

@@ -3,17 +3,34 @@
 // Coordinates are normalised [0,1] with (0,0) top-left of the output.
 // Calibration MUST be reset to identity before capture, else the "actual"
 // taps are already transformed and the derived matrix is wrong.
+//
+// BOTH of this wizard's writes go over the system.kiosk plugin verbs, the
+// same route the Display & Touch panel takes and the same route a remote
+// browser takes. They used to go through the WebKit bridge
+// (evo_set_touch_calibration, evo_sample_touch_calibration_from_corners),
+// which reaches the identical evo-kiosk-config functions in-process and so
+// could not be refused by anything: not the per-verb capability gate, not
+// the household policy. The reset is the sharper half of that - it wipes
+// the touch matrix as its FIRST act, so an ungated wizard could break touch
+// on a box whose policy forbids exactly that, and then be unable to put it
+// back.
+//
+// One route, one classifier: every outcome here goes through
+// classifyKioskWrite, so a household refusal opens the one household modal
+// and anything else is an honest failure. Never Pair.
 
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { JSX } from "preact";
 import { Check } from "lucide-preact";
 import { t } from "../../runtime/i18n";
+import type { CalibrationSample } from "./kiosk-bridge";
+import { useKioskRemote } from "./kiosk-remote";
 import {
-  sampleTouchFromCorners,
-  setTouchCalibration,
-  type CalibrationSample,
+  classifyKioskWrite,
+  readDerivedCalibration,
   type DerivedCalibration
-} from "./kiosk-bridge";
+} from "./osk-state";
+import { useHouseholdModal } from "../household/HouseholdModalHost";
 
 const CORNERS: ReadonlyArray<{ x: number; y: number; key: string }> = [
   { x: 0.1, y: 0.1, key: "kiosk.cal.topLeft" },
@@ -40,6 +57,23 @@ export function TouchCalibrationWizard(props: {
   const [derived, setDerived] = useState<DerivedCalibration | null>(null);
   const [errorMsg, setErrorMsg] = useState<string>("");
   const samplesRef = useRef<CalibrationSample[]>([]);
+  const remote = useKioskRemote();
+  const household = useHouseholdModal();
+
+  // A household refusal is not a wizard error. Close the wizard and put
+  // the operator in front of the one door that can resolve it - the same
+  // modal the Calibrate open-guard opens, never a second host. With no
+  // household context (designer, tests) there is no door to open, so say
+  // what happened instead of dead-ending.
+  const onLocked = useCallback((): void => {
+    if (household !== null) {
+      onClose();
+      household.open();
+      return;
+    }
+    setErrorMsg(t("household.locked.body"));
+    setPhase("error");
+  }, [household, onClose]);
 
   const restart = useCallback((): void => {
     samplesRef.current = [];
@@ -50,38 +84,72 @@ export function TouchCalibrationWizard(props: {
     setPhase("reset");
   }, []);
 
-  // Reset to identity, let the systemd path unit apply, then capture.
+  // Reset to identity over the gated verb, let the systemd path unit
+  // apply, then capture. Capture starts only once the player has ACCEPTED
+  // the reset - starting it on a refused reset would sample taps that are
+  // still transformed and derive a matrix from them.
   useEffect(() => {
     if (phase !== "reset") return;
     let live = true;
-    setTouchCalibration("0", false, false);
-    const id = setTimeout(() => {
-      if (live) setPhase("capture");
-    }, 500);
+    let id: ReturnType<typeof setTimeout> | undefined;
+    void remote.setTouchCalibration("0", false, false).then((res) => {
+      if (!live) return;
+      switch (classifyKioskWrite(res)) {
+        case "ok":
+          id = setTimeout(() => {
+            if (live) setPhase("capture");
+          }, 500);
+          return;
+        case "locked":
+          onLocked();
+          return;
+        default:
+          setErrorMsg(res.message ?? t("kiosk.displayRefused"));
+          setPhase("error");
+      }
+    });
     return () => {
       live = false;
-      clearTimeout(id);
+      if (id !== undefined) clearTimeout(id);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
 
-  // Submit once all four corners are captured.
+  // Submit once all four corners are captured. The player derives and
+  // persists; we only read back what it decided.
   useEffect(() => {
     if (phase !== "submitting") return;
     let live = true;
-    void sampleTouchFromCorners(samplesRef.current)
-      .then((d) => {
+    void remote
+      .deriveTouchCalibrationFromCorners(samplesRef.current)
+      .then((res) => {
         if (!live) return;
-        setDerived(d);
-        setPhase("confirm");
-      })
-      .catch((e: unknown) => {
-        if (!live) return;
-        setErrorMsg(e instanceof Error ? e.message : String(e));
-        setPhase("error");
+        switch (classifyKioskWrite(res)) {
+          case "ok": {
+            const d = readDerivedCalibration(res.value);
+            if (d === null) {
+              // Accepted but unreadable: report it rather than paint a
+              // triple we made up.
+              setErrorMsg(t("kiosk.cal.unreadable"));
+              setPhase("error");
+              return;
+            }
+            setDerived(d);
+            setPhase("confirm");
+            return;
+          }
+          case "locked":
+            onLocked();
+            return;
+          default:
+            setErrorMsg(res.message ?? t("kiosk.displayRefused"));
+            setPhase("error");
+        }
       });
     return () => {
       live = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
 
   const onCaptureTap = useCallback(
@@ -159,7 +227,7 @@ export function TouchCalibrationWizard(props: {
       {phase === "confirm" && derived !== null && (
         <div className="kiosk-cal-center">
           <p className="kiosk-cal-result">{derivedSummary(derived)}</p>
-          {derived.mean_error > 0.05 ? (
+          {derived.meanError > 0.05 ? (
             <p className="kiosk-cal-warn">{t("kiosk.cal.imperfect")}</p>
           ) : null}
           <div className="kiosk-cal-actions">

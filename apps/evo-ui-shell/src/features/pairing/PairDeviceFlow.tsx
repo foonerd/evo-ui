@@ -51,14 +51,21 @@ function deviceHint(): string {
 
 export function PairDeviceFlow({
   onClose,
-  onPaired
+  onPaired,
+  forced = false
 }: {
-  onClose: () => void;
+  /** Cancel handler for the dismissible (Settings / surface) pair. Unused in
+   *  forced mode - onboarding pair has no cancel control. */
+  onClose?: () => void;
   /** When provided, called after the bearer is stored INSTEAD of a full
    *  page reload - so a surface (e.g. the network page) can re-establish
    *  its bearer socket in place and keep the operator where they are.
    *  When absent, we reload so every mounted transport re-handshakes. */
   onPaired?: (token: string) => void;
+  /** Forced onboarding pair (browser, no bearer): no Cancel, no ESC /
+   *  backdrop / close - the operator must pair before usage. Default false is
+   *  the cancellable Settings / surface pair, unchanged. */
+  forced?: boolean;
 }): JSX.Element {
   useLocale();
   const [password, setPassword] = useState("");
@@ -86,7 +93,7 @@ export function PairDeviceFlow({
   };
 
   return (
-    <Modal title={t("pairing.title")} onCancel={onClose}>
+    <Modal title={t("pairing.title")} onCancel={onClose} dismissible={!forced}>
       <p className="evo-modal-hint">{t("pairing.auth.body")}</p>
       <label className="evo-modal-label">
         {t("pairing.auth.passwordLabel")}
@@ -101,14 +108,16 @@ export function PairDeviceFlow({
         />
       </label>
       <div className="evo-modal-actions">
-        <button
-          type="button"
-          className="evo-modal-button evo-modal-button-secondary"
-          disabled={busy}
-          onClick={onClose}
-        >
-          {t("dialog.cancel")}
-        </button>
+        {forced ? null : (
+          <button
+            type="button"
+            className="evo-modal-button evo-modal-button-secondary"
+            disabled={busy}
+            onClick={onClose}
+          >
+            {t("dialog.cancel")}
+          </button>
+        )}
         <button
           type="button"
           className="evo-modal-button evo-modal-button-primary"

@@ -8,8 +8,21 @@
 /** Hard ceiling for time-to-usable-shell (exact or degraded). */
 export const USABLE_SHELL_BUDGET_MS = 2000;
 
-/** Single WS open attempt budget. */
+/** Single WS open attempt budget on the CRITICAL path (first paint).
+ *  Kept tight so a dead host degrades inside USABLE_SHELL_BUDGET_MS and
+ *  is never hidden behind a long spinner. Do NOT raise this to "make a
+ *  slow box connect" - that is what RECOVERY_OPEN_DEADLINE_MS is for. */
 export const DEFAULT_OPEN_DEADLINE_MS = 800;
+
+/** Single WS open attempt budget on the RECOVERY path, used only AFTER
+ *  the critical budget is spent (transport reconnect after a drop, and
+ *  the playback recovery loop). This device's real WS handshake is
+ *  ~1.7-3s (measured on the NUC rig), so the 800ms critical budget can
+ *  never complete a reconnect and the shell would loop forever. Recovery
+ *  is given room for a real handshake while staying bounded - never the
+ *  browser's multi-minute default. It must not gate first paint, so it
+ *  is deliberately larger than DEFAULT_OPEN_DEADLINE_MS. */
+export const RECOVERY_OPEN_DEADLINE_MS = 8000;
 
 /** Per seed-read budget (get_now_playing / get_stream_format).
  *  Seeds run in parallel and never gate the connected/degraded paint. */

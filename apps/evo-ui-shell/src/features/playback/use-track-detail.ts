@@ -1,8 +1,8 @@
 // Reads the composite /api/v1/audio/track_detail for the current
 // track and returns its decoded reconciliation.
 //
-// STATE-DRIVEN, no timers: it fetches exactly once when the track
-// (mpdPath) changes, aborts the in-flight request on a track change or
+// STATE-DRIVEN, no timers: it fetches exactly once when the target
+// (scheme, value) changes, aborts the in-flight request on a change or
 // unmount, and clears stale detail immediately so the strip never
 // shows the previous track's facts. A slow read simply resolves later
 // - it never blocks or blanks the now-playing surface, which renders
@@ -10,6 +10,13 @@
 //
 // This is a secondary read on the now-playing surface only; it never
 // runs on the player boot critical path.
+//
+// BOUNDARY: the subject scheme is caller-supplied envelope data, NOT a
+// constant baked into this helper. The helper is scheme-agnostic so a
+// non-MPD source needs no edit here; the caller supplies the scheme
+// (today "mpd-path", from the envelope once it carries one). The
+// /api/v1/audio/track_detail route is distribution product, not a
+// framework primitive - this consumer must not assume mpd.
 
 import { useEffect, useState } from "preact/hooks";
 import {
@@ -27,14 +34,23 @@ export interface TrackDetailState {
   phase: TrackDetailPhase;
 }
 
-export function useTrackDetail(mpdPath: string | null): TrackDetailState {
+export function useTrackDetail(
+  scheme: string | null,
+  value: string | null
+): TrackDetailState {
   const [state, setState] = useState<TrackDetailState>({
     detail: null,
     phase: "idle"
   });
 
   useEffect(() => {
-    if (mpdPath === null || typeof fetch === "undefined") {
+    if (
+      scheme === null ||
+      scheme.length === 0 ||
+      value === null ||
+      value.length === 0 ||
+      typeof fetch === "undefined"
+    ) {
       setState({ detail: null, phase: "idle" });
       return;
     }
@@ -42,8 +58,10 @@ export function useTrackDetail(mpdPath: string | null): TrackDetailState {
     let cancelled = false;
     const controller = new AbortController();
     const url =
-      "/api/v1/audio/track_detail?scheme=mpd-path&value=" +
-      encodeURIComponent(mpdPath);
+      "/api/v1/audio/track_detail?scheme=" +
+      encodeURIComponent(scheme) +
+      "&value=" +
+      encodeURIComponent(value);
     void (async (): Promise<void> => {
       try {
         const res = await fetch(url, { signal: controller.signal });
@@ -61,7 +79,7 @@ export function useTrackDetail(mpdPath: string | null): TrackDetailState {
             : { detail: null, phase: "error" }
         );
       } catch {
-        // Aborted (track change / unmount) leaves cancelled=true and we
+        // Aborted (target change / unmount) leaves cancelled=true and we
         // do nothing; a genuine network error surfaces as `error` so the
         // UI shows an honest failure, not an eternal spinner.
         if (!cancelled) setState({ detail: null, phase: "error" });
@@ -71,7 +89,7 @@ export function useTrackDetail(mpdPath: string | null): TrackDetailState {
       cancelled = true;
       controller.abort();
     };
-  }, [mpdPath]);
+  }, [scheme, value]);
 
   return state;
 }

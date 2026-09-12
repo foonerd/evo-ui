@@ -11,7 +11,7 @@ This repository contains project materials related to **evo** / **evoframework**
 
 - Accurate factual references (example: "compatible with evo").
 - Educational, editorial, and nominative fair-use references.
-- Documentation that does not imply endorsement.
+- Internal engineering discussion/documentation that does not imply endorsement.
 
 ## Not allowed without explicit written permission
 

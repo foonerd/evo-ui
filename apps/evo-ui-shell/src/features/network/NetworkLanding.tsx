@@ -6,9 +6,11 @@
 // Data notes: per-interface IP comes from the supervisor device table's
 // `ip4` when present (framework follow-up); until then we fall back to
 // static-from-intent, then the default-route IP for the active uplink,
-// then a dash. The AP address is the fixed NM shared subnet gateway.
+// then a dash. The AP tile shows an address + ifname ONLY from a live
+// ap* device in the table; with no live AP it reads Off - never a
+// fabricated gateway or ap0 (hotspot_enabled is intent, not liveness).
 
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import type { JSX } from "preact";
 import {
   Wifi,
@@ -26,6 +28,7 @@ import { EvoSelect } from "../../components/EvoSelect";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 import { useNetworkLink } from "./useNetworkLink";
+import { NETWORK_STATUS_GRACE_MS, statusPaint } from "./network-status-bound";
 import {
   bandLabel,
   deviceConnected,
@@ -36,8 +39,6 @@ import {
 import { PairDeviceFlow } from "../pairing/PairDeviceFlow";
 import { CaptivePortal } from "./CaptivePortal";
 import { HeartbeatMark } from "../../components/HeartbeatMark";
-
-const AP_GATEWAY = "10.42.0.1";
 
 type Link = ReturnType<typeof useNetworkLink>;
 type Popup =
@@ -161,8 +162,24 @@ export function NetworkLanding(): JSX.Element {
   const dt = link.deviceTable;
   // network.nm.status carries every interface's IP + state. When it hasn't
   // answered yet (empty table - e.g. the verb is blocked during NM churn),
-  // show "Checking" rather than falsely asserting Disconnected with no IP.
+  // show "Checking" rather than falsely asserting Disconnected with no IP -
+  // but only inside a short grace. Past it an empty table is an honest
+  // "status unavailable" (or the Pair CTA when the classifier said pair),
+  // never an indefinite Checking. The quiet poll keeps re-asking; when the
+  // read answers the table fills and the grace resets.
   const dtLoaded = dt.length > 0;
+  const [checkTimedOut, setCheckTimedOut] = useState(false);
+  useEffect(() => {
+    if (dtLoaded) {
+      setCheckTimedOut(false);
+      return undefined;
+    }
+    const id = window.setTimeout(
+      () => setCheckTimedOut(true),
+      NETWORK_STATUS_GRACE_MS
+    );
+    return () => window.clearTimeout(id);
+  }, [dtLoaded]);
   const ethRow = dt.find((d) => /ethernet/i.test(d.kind ?? "") || /^(eth|en)/i.test(d.ifname));
   const wifiRow = dt.find((d) => d.ifname === intent.wifi.ifname || (/wifi|wireless/i.test(d.kind ?? "") && !/^ap/i.test(d.ifname)));
   const apRow = dt.find((d) => /^ap/i.test(d.ifname));
@@ -199,13 +216,35 @@ export function NetworkLanding(): JSX.Element {
   const savedSsid = intent.wifi.sta_ssid.trim();
   const wifiSsid = liveSsid || savedSsid;
   const hasWifi = wifiConnected || savedSsid.length > 0;
+  // hotspot_enabled is INTENT - it drives the kebab (enable/disable) only.
+  // The card body must reflect a genuinely LIVE ap* device from the
+  // supervisor table, never intent, so intent alone can't paint a running
+  // AP with a fabricated 10.42.0.1. No live ap device -> Off, no IP.
+  // Tile sublines are Ethernet / Wi-Fi / Access point — never a kernel ifname.
   const apEnabled = intent.fallback.hotspot_enabled;
+  const apLive = apRow !== undefined && deviceConnected(apRow.state ?? null);
   const apName = intent.wifi.ap_ssid.trim();
-  const apIp = ipOnly(apRow?.ip4 ?? AP_GATEWAY) ?? AP_GATEWAY;
+  const apLiveIp = apLive && apRow !== undefined ? ipOnly(apRow.ip4 ?? null) : null;
 
   const close = (): void => setPopup(null);
 
-  const authError = link.error !== null && /step.?up|scope|permission|denied|unauthori|not.hold/i.test(link.error);
+  // authNeeded is the pair ceremony only (pair_expired /
+  // pair_unknown / pair_wrong_code). A household lock is the
+  // banner, not this prompt. Every other error is an honest fault.
+  const authError = link.authNeeded;
+
+  // One paint decision for the empty-table state (see network-status-bound).
+  // Inside the grace the tiles say "Checking"; past it, "Unknown" plus the
+  // honest notice below - or the Pair CTA above when the classifier said pair.
+  const paint = statusPaint({
+    loaded: dtLoaded,
+    timedOut: checkTimedOut,
+    pair: authError
+  });
+  const emptyLabel =
+    paint === "checking"
+      ? t("settings.network.checking")
+      : t("settings.network.statusUnknown");
 
   return (
     <>
@@ -214,6 +253,24 @@ export function NetworkLanding(): JSX.Element {
           <span>{t("settings.network.authNeeded")}</span>
           <button type="button" className="settings-link-button" onClick={() => setPairOpen(true)}>
             {t("settings.network.pairToManage")}
+          </button>
+        </div>
+      ) : null}
+
+      {!authError && link.error !== null ? (
+        <div className="net-notice">
+          <span>{link.error}</span>
+        </div>
+      ) : null}
+
+      {paint === "error" && link.error === null ? (
+        // The status read never answered inside the grace and nothing else
+        // explained it: say so, and offer the existing operator refresh (the
+        // same read the quiet poll re-asks - not a new wire op).
+        <div className="net-notice">
+          <span>{t("settings.network.statusUnavailable")}</span>
+          <button type="button" className="settings-link-button" onClick={() => void link.refresh()}>
+            {t("settings.network.tryAgain")}
           </button>
         </div>
       ) : null}
@@ -231,8 +288,8 @@ export function NetworkLanding(): JSX.Element {
               items={[{ text: t("settings.network.changeIp"), onClick: () => setPopup({ kind: "ethIp" }) }]}
             />
           </div>
-          <div className="net-tile-ip">{ethIp ?? (!dtLoaded ? t("settings.network.checking") : ethConnected ? t("settings.network.connected") : "—")}</div>
-          <div className="net-tile-sub">{(ethRow?.ifname ?? "eth0") + " · " + (!dtLoaded ? t("settings.network.checking") : ethConnected ? t("settings.network.connected") : t("settings.network.disconnected"))}</div>
+          <div className="net-tile-ip">{ethIp ?? (!dtLoaded ? emptyLabel : ethConnected ? t("settings.network.connected") : "—")}</div>
+          <div className="net-tile-sub">{t("settings.network.lan") + " · " + (!dtLoaded ? emptyLabel : ethConnected ? t("settings.network.connected") : t("settings.network.disconnected"))}</div>
         </div>
 
         <div className="net-tile">
@@ -259,16 +316,16 @@ export function NetworkLanding(): JSX.Element {
               ]}
             />
           </div>
-          <div className="net-tile-name">{!dtLoaded && !hasWifi ? t("settings.network.checking") : hasWifi ? wifiSsid : t("settings.network.notConnectedWifi")}</div>
-          <div className="net-tile-ip">{wifiIp ?? (!dtLoaded ? t("settings.network.checking") : wifiConnected ? t("settings.network.connected") : "—")}</div>
-          <div className="net-tile-sub">{intent.wifi.ifname + " · " + (!dtLoaded ? t("settings.network.checking") : wifiConnected ? t("settings.network.connected") : hasWifi ? t("settings.network.saved") : t("settings.network.disconnected"))}</div>
+          <div className="net-tile-name">{!dtLoaded && !hasWifi ? emptyLabel : hasWifi ? wifiSsid : t("settings.network.notConnectedWifi")}</div>
+          <div className="net-tile-ip">{wifiIp ?? (!dtLoaded ? emptyLabel : wifiConnected ? t("settings.network.connected") : "—")}</div>
+          <div className="net-tile-sub">{t("settings.network.wifi") + " · " + (!dtLoaded ? emptyLabel : wifiConnected ? t("settings.network.connected") : hasWifi ? t("settings.network.saved") : t("settings.network.disconnected"))}</div>
         </div>
 
         <div className="net-tile">
           <div className="net-tile-head">
             <Router size={20} className="net-tile-icon" />
             <span className="net-tile-title">{t("settings.network.accessPoint")}</span>
-            <Sticker label={apEnabled ? t("settings.network.enabled") : t("settings.network.disabled")} tone={apEnabled ? "accent" : "muted"} />
+            <Sticker label={apLive ? t("settings.network.enabled") : t("settings.network.apOff")} tone={apLive ? "accent" : "muted"} />
             <Kebab
               label={t("settings.network.accessPoint")}
               items={
@@ -281,9 +338,11 @@ export function NetworkLanding(): JSX.Element {
               }
             />
           </div>
-          <div className="net-tile-name">{apEnabled ? (apName || t("settings.network.unnamedAp")) : t("settings.network.apOff")}</div>
-          {apEnabled ? <div className="net-tile-ip">{apIp}</div> : null}
-          <div className="net-tile-sub">{(apRow?.ifname ?? "ap0") + " · " + (apEnabled ? t("settings.network.startsOnBoot") : t("settings.network.off"))}</div>
+          <div className="net-tile-name">{apLive ? (apName || t("settings.network.unnamedAp")) : t("settings.network.apOff")}</div>
+          {apLiveIp !== null ? <div className="net-tile-ip">{apLiveIp}</div> : null}
+          {apLive ? (
+            <div className="net-tile-sub">{t("settings.network.hotspotIface") + " · " + t("settings.network.apActive")}</div>
+          ) : null}
         </div>
 
         <AdvancedTile link={link} />

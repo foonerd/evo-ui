@@ -15,6 +15,7 @@ import { Fragment } from "preact";
 import type { JSX } from "preact";
 import { ConfirmDialog, Modal } from "../../components/dialogs";
 import { PairDeviceFlow } from "../pairing/PairDeviceFlow";
+import { isPairRequired, isHouseholdLocked } from "../../runtime/authz-classify";
 import { reauthPromptResponder } from "../prompts/usePromptResponder";
 import { friendlyVerbError } from "./friendly-error";
 import { t } from "../../runtime/i18n";
@@ -105,12 +106,6 @@ function affordances(cls: UsbDriveClass): Affordance {
   }
 }
 
-function isAuthRefusal(r: { subclass: string | null; message: string }): boolean {
-  const s = (r.subclass ?? "").toLowerCase();
-  if (/step.?up|pair|unauthor|forbidden|denied|scope/.test(s)) return true;
-  return /pair (again|this device)|step.?up|not paired|unauthor|forbidden/i.test(r.message);
-}
-
 function hostForPreview(): string {
   if (typeof window === "undefined") return "device";
   return window.location.hostname || "device";
@@ -152,9 +147,15 @@ export function UsbDrivesSurface(): JSX.Element {
     setFeedback("");
     const r = await fn();
     setBusy(false);
-    if (r.ok) return;
-    if (isAuthRefusal(r)) {
+    if (r.ok) {
+      return;
+    }
+    if (isPairRequired(r)) {
       setAuthRefused(true);
+      return;
+    }
+    if (isHouseholdLocked(r)) {
+      setAuthRefused(false);
       return;
     }
     const probe = `${r.subclass ?? ""} ${r.message}`.toLowerCase();

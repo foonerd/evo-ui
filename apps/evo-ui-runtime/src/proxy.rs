@@ -80,7 +80,7 @@ impl FrameworkProxy {
     }
 
     /// Build a proxy client from already-read CA-bundle bytes.
-    /// Split out of [`new`] so the hot-reload watcher can rebuild
+    /// Split out of [`Self::new`] so the hot-reload watcher can rebuild
     /// from the exact bytes it fingerprinted (no re-read race) and
     /// so both paths share one trust-root construction. `origin` is
     /// a human label for the bytes' source, used only in errors.
@@ -613,6 +613,13 @@ fn build_upstream_ws_handshake(
     // path used by external API consumers) + Authorization
     // header (Bearer-header path).
     for header_name in ["sec-websocket-protocol", "authorization"] {
+        // Nested on purpose. Collapsing these two conditions needs a
+        // let-chain, and let-chains are Rust 1.88; this crate's floor
+        // is 1.85, where they refuse outright. The nesting was written
+        // by the change that removed the let-chains for exactly that
+        // reason, and re-collapsing it would raise the floor rather
+        // than tidy the code.
+        #[allow(clippy::collapsible_if)]
         if let Some(v) = client_headers.get(header_name) {
             if let Ok(s) = v.to_str() {
                 out.push_str(&format!("{header_name}: {s}\r\n"));

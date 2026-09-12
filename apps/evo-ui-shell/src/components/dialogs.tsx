@@ -30,14 +30,26 @@ import { useLocale } from "../runtime/use-locale";
 
 interface ModalProps {
   title: string;
-  onCancel: () => void;
+  /** Cancel handler for the dismiss controls. Optional: a forced dialog
+   *  (dismissible=false) wires no dismiss control, so it passes none. */
+  onCancel?: () => void;
+  /** Dismissible (default): ESC, backdrop click and the X close button all
+   *  cancel. A FORCED dialog (e.g. onboarding pair) passes false: no ESC, no
+   *  backdrop dismiss, no X - the operator must complete the step. onCancel is
+   *  then never reached, so there is no dead no-op control. */
+  dismissible?: boolean;
   children: ComponentChildren;
 }
 
-/** Modal overlay + card. Closes on ESC and on backdrop click. The
- *  primary content (form / list) goes in children; the actions row is
- *  the responsibility of the specialised dialog. */
-export function Modal({ title, onCancel, children }: ModalProps): JSX.Element {
+/** Modal overlay + card. Dismissible closes on ESC and on backdrop click; a
+ *  forced modal cannot be dismissed. The primary content (form / list) goes in
+ *  children; the actions row is the responsibility of the specialised dialog. */
+export function Modal({
+  title,
+  onCancel,
+  dismissible = true,
+  children
+}: ModalProps): JSX.Element {
   useLocale();
   const cardRef = useRef<HTMLDivElement | null>(null);
 
@@ -50,13 +62,14 @@ export function Modal({ title, onCancel, children }: ModalProps): JSX.Element {
   }, []);
 
   // Rides the attention layer (law L1): body portal, dialog z-band,
-  // ESC + backdrop dismissal, focus custody - all owned centrally.
+  // focus custody - all owned centrally. ESC + backdrop dismissal are gated
+  // on `dismissible` (a forced dialog passes neither handler).
   return (
     <AttentionOverlay
       band="dialog"
       className="evo-modal-root"
-      onDismiss={onCancel}
-      dismissOnBackdrop
+      onDismiss={dismissible ? onCancel : undefined}
+      dismissOnBackdrop={dismissible}
     >
       <div
         ref={cardRef}
@@ -68,15 +81,17 @@ export function Modal({ title, onCancel, children }: ModalProps): JSX.Element {
       >
         <div className="evo-modal-head">
           <h4 className="evo-modal-title">{title}</h4>
-          <button
-            type="button"
-            className="evo-modal-close"
-            onClick={onCancel}
-            aria-label={t("dialog.close")}
-            title={t("dialog.close")}
-          >
-            <X size={16} />
-          </button>
+          {dismissible ? (
+            <button
+              type="button"
+              className="evo-modal-close"
+              onClick={onCancel}
+              aria-label={t("dialog.close")}
+              title={t("dialog.close")}
+            >
+              <X size={16} />
+            </button>
+          ) : null}
         </div>
         {children}
       </div>

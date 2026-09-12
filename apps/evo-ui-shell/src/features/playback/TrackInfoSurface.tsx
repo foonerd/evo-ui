@@ -21,7 +21,9 @@ export function TrackInfoSurface({
 }: TrackInfoSurfaceProps) {
   useLocale();
   const track = nowPlaying?.track ?? null;
-  const { detail, phase } = useTrackDetail(track?.mpdPath ?? null);
+  // Scheme supplied at the call site (mpd source today), not baked into
+  // the helper; reads from the envelope once it carries a scheme.
+  const { detail, phase } = useTrackDetail("mpd-path", track?.mpdPath ?? null);
 
   if (track === null) {
     return (

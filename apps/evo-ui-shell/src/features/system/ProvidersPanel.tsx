@@ -3,13 +3,24 @@
 // The operator's control over the framework-wide online-provider
 // cascade. Each provider can be switched on/off and nudged up/down the
 // priority order; the store hot-applies via its change bus, so a toggle
-// takes effect on the next metadata verb with no restart. A stored key
-// (credentials panel) does nothing until its provider is enabled here -
-// this panel is what turns a saved Last.fm/Discogs/Genius key from inert
-// into used. "Needs key" marks an identity-bearing provider whose key is
-// absent from the vault (honest has_credential from the framework).
+// takes effect on the next metadata verb with no restart.
+//
+// Rule (evo-device-audio@936480c): a stored key MEANS the provider is
+// used - no second gesture. A keyed provider defaults on the moment its
+// key lands in the vault; this toggle is the explicit off-switch that
+// stops using it WITHOUT destroying the credential (deleting the key was
+// the only off-switch before, which was a bad one). An identity-bearing
+// provider with no key (honest has_credential:false) shows its row with
+// the toggle inert and points at the Stored Keys panel - adding the key
+// there both stores it and brings the provider up.
 
-import { ChevronDown, ChevronUp, KeyRound, SlidersHorizontal } from "lucide-preact";
+import {
+  ChevronDown,
+  ChevronUp,
+  KeyRound,
+  ShieldCheck,
+  SlidersHorizontal
+} from "lucide-preact";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 import { useProviders, DEFAULT_PRIORITY } from "../providers/useProviders";
@@ -38,13 +49,21 @@ function providerLabel(id: string): string {
 /** Content-kind chips: known kinds get a clean label; unknown ones fall
  *  back to the raw token with underscores softened. */
 function prettyKind(kind: string): string {
+  // Keys are the kind tokens the framework listing actually emits
+  // (verified live: bio / artist_artwork / album_artwork /
+  // reconciliation ...). Legacy aliases kept so an older device still
+  // renders a clean label.
   const known: Record<string, string> = {
+    bio: "Bio",
     artist_bio: "Bio",
     album_notes: "Notes",
     lyrics: "Lyrics",
     release_credits: "Credits",
     track_annotation: "Annotation",
     work_notes: "Work notes",
+    reconciliation: "Matching",
+    artist_artwork: "Artist image",
+    album_artwork: "Album art",
     artist_image: "Artist image",
     album_art: "Album art"
   };
@@ -53,7 +72,10 @@ function prettyKind(kind: string): string {
 
 export function ProvidersPanel() {
   useLocale();
-  const { entries, error, busy, setEnabled, setPriority } = useProviders();
+  const { entries, privacyMode, error, busy, setEnabled, setPriority, setPrivacyMode } =
+    useProviders();
+
+  const PRIVACY_MODES = ["enhanced", "anonymous_only", "offline"] as const;
 
   return (
     <div className="settings-section providers-panel">
@@ -61,6 +83,42 @@ export function ProvidersPanel() {
         <SlidersHorizontal size={15} /> {t("providers.title")}
       </h4>
       <p className="feature-description">{t("providers.help")}</p>
+
+      <div className="providers-privacy-control">
+        <span className="providers-privacy-label">
+          <ShieldCheck size={13} /> {t("providers.privacyTitle")}
+        </span>
+        <div
+          className="collection-view-toggle"
+          role="group"
+          aria-label={t("providers.privacyTitle")}
+        >
+          {PRIVACY_MODES.map((m) => (
+            <button
+              key={m}
+              type="button"
+              className={
+                privacyMode === m
+                  ? "collection-view-toggle-button collection-view-toggle-active"
+                  : "collection-view-toggle-button"
+              }
+              aria-pressed={privacyMode === m}
+              disabled={busy}
+              onClick={() => void setPrivacyMode(m)}
+            >
+              {t(`providers.privacy.${m}` as never)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {privacyMode !== "enhanced" ? (
+        <p className="providers-privacy-banner" role="status">
+          {privacyMode === "offline"
+            ? t("providers.privacyOffline")
+            : t("providers.privacyAnonymousOnly")}
+        </p>
+      ) : null}
 
       {error !== null ? (
         <p className="credentials-feedback" role="alert">
@@ -78,11 +136,25 @@ export function ProvidersPanel() {
             const eff = p.priority ?? DEFAULT_PRIORITY;
             const needsKey =
               !p.hasCredential && p.privacyClass !== "anonymous";
+            // Privacy posture is non-bypassable framework-side and
+            // outranks the operator's per-provider toggle. offline
+            // suppresses every network provider; anonymous_only
+            // suppresses identity-bearing ones. The row shows this as
+            // an inert "Disabled by Privacy mode" state WITHOUT
+            // touching p.enabled - the operator's choice is preserved
+            // underneath and returns when they leave the posture.
+            const suppressed =
+              privacyMode === "offline" ||
+              (privacyMode === "anonymous_only" &&
+                p.privacyClass === "identity_bearing");
+            const effectiveOn = p.enabled && !suppressed;
             return (
               <li
                 key={p.providerId}
                 className={
-                  p.enabled ? "provider-row provider-row-on" : "provider-row"
+                  "provider-row" +
+                  (effectiveOn ? " provider-row-on" : "") +
+                  (suppressed ? " provider-row-suppressed" : "")
                 }
               >
                 <div className="provider-main">
@@ -90,7 +162,11 @@ export function ProvidersPanel() {
                     {providerLabel(p.providerId)}
                   </span>
                   <span className="provider-meta">
-                    {needsKey ? (
+                    {suppressed ? (
+                      <span className="provider-chip provider-chip-privacy">
+                        {t("providers.suppressedByPrivacy")}
+                      </span>
+                    ) : needsKey ? (
                       <span className="provider-chip provider-chip-warn">
                         <KeyRound size={11} /> {t("providers.needsKey")}
                       </span>
@@ -126,16 +202,41 @@ export function ProvidersPanel() {
                   <button
                     type="button"
                     role="switch"
-                    aria-checked={p.enabled}
+                    // Effective state, not raw intent: a screen reader
+                    // must not hear "on" while the posture suppresses it.
+                    aria-checked={effectiveOn}
                     className={
-                      p.enabled
+                      effectiveOn
                         ? "provider-toggle provider-toggle-on"
                         : "provider-toggle"
                     }
-                    disabled={busy}
+                    // Inert when the posture suppresses it (can't be
+                    // bypassed here) or when a keyed provider has no key
+                    // in the vault (nothing to turn on - points at
+                    // Stored Keys). p.enabled is never mutated in either
+                    // case, so the operator's choice survives.
+                    disabled={busy || needsKey || suppressed}
+                    title={
+                      suppressed
+                        ? t("providers.suppressedByPrivacyHint")
+                        : needsKey
+                          ? t("providers.needsKeyHint")
+                          : undefined
+                    }
+                    aria-label={
+                      suppressed
+                        ? t("providers.suppressedByPrivacyHint")
+                        : needsKey
+                          ? t("providers.needsKeyHint")
+                          : undefined
+                    }
                     onClick={() => void setEnabled(p.providerId, !p.enabled)}
                   >
-                    {p.enabled ? t("providers.on") : t("providers.off")}
+                    {suppressed
+                      ? t("providers.off")
+                      : p.enabled
+                        ? t("providers.on")
+                        : t("providers.off")}
                   </button>
                 </div>
               </li>

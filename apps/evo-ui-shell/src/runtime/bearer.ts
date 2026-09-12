@@ -26,6 +26,17 @@ export function storedBearer(): string | undefined {
   return token;
 }
 
+/** Purge the stored operator bearer. Called ONLY once an anonymous
+ *  read has proved the device is reachable while the bearer socket was
+ *  refused - i.e. the token itself is dead (device reset, revoked, or
+ *  expired), never on a transient outage (which fails anonymously too).
+ *  The surface then drops to its unpaired "pair to manage" state with
+ *  live read-only content, no site-data clearing or incognito needed. */
+export function clearBearer(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem("evoBearer");
+}
+
 export function bearerCapabilities(token: string | undefined): BearerCapability[] {
   if (token === undefined) return [];
   try {

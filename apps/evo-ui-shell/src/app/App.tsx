@@ -63,6 +63,7 @@ import { isLayoutDebugMode, LayoutDebugBadge } from "../dev/LayoutDebugBadge";
 import type { BootstrapResult } from "../core/types";
 import { getCapabilityStatus } from "../core/feature-gates";
 import { StepUpHost } from "../features/pairing/StepUpHost";
+import { HouseholdModalProvider } from "../features/household/HouseholdModalHost";
 import { KioskCalibrationHost } from "../features/kiosk/KioskCalibrationHost";
 import { kioskMode } from "../features/kiosk/kiosk-bridge";
 import { PlaybackSurface } from "../features/playback/PlaybackSurface";
@@ -101,6 +102,7 @@ import { PromptSurface } from "../features/prompts/PromptSurface";
 import { NotificationSurfaces } from "../features/notifications/NotificationSurfaces";
 import { SourcesSurface } from "../features/sources/SourcesSurface";
 import { UsbDrivesSurface } from "../features/sources/UsbDrivesSurface";
+import { HouseholdSurfaceGate } from "../features/household/HouseholdSurfaceGate";
 import type { DiagnosticsSurfaceProps } from "../features/system/DiagnosticsSurface";
 import { OperationsSurface } from "../features/operations/OperationsSurface";
 import { SidebarSystemActions } from "../features/system/SidebarSystemActions";
@@ -358,7 +360,9 @@ function listTextModeKey(surface: ListTextSurface): string {
 export function App(props: { embeddedInDisplayTest?: boolean } = {}) {
   return (
     <PlayerShellProviders>
-      <AppShell {...props} />
+      <HouseholdModalProvider>
+        <AppShell {...props} />
+      </HouseholdModalProvider>
       <StepUpHost />
       {kioskMode() === "glass" ? <KioskCalibrationHost /> : null}
     </PlayerShellProviders>
@@ -1925,10 +1929,10 @@ function AppShell({
           ) : null}
 
           {activeView === "sources" ? (
-            <Fragment>
+            <HouseholdSurfaceGate group="sources">
               <SourcesSurface onOpenInLibrary={openInLibrary} />
               <UsbDrivesSurface />
-            </Fragment>
+            </HouseholdSurfaceGate>
           ) : null}
 
           {activeView === "system" ? (

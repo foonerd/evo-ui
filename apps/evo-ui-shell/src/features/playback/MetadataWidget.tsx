@@ -33,7 +33,7 @@ export function MetadataWidget({
 }) {
   useLocale();
   const track = nowPlaying?.track ?? null;
-  const { detail, phase } = useTrackDetail(track?.mpdPath ?? null);
+  const { detail, phase } = useTrackDetail("mpd-path", track?.mpdPath ?? null);
   const loading = phase === "loading";
 
   let body: preact.ComponentChildren;

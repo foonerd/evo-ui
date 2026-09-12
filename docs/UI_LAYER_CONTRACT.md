@@ -280,7 +280,7 @@ Conclusion: current primitives are necessary but not sufficient.
 2. Draft D2 mappings and identify exact core/plugin additions needed.
 3. Mark each required addition with owner and due phase.
 4. Re-run Go/No-Go gate before writing feature code in `evo-ui`.
-5. Ratify UI runtime settings architecture (authoritative-runtime settings shape: the runtime service is the source of truth; the shell reads over the API and never persists locally) before claiming cross-session reliability.
+5. Ratify UI runtime settings architecture (see the settings-authoritative-runtime decision record under `docs/adr/`) before claiming cross-session reliability.
 
 ## 10) Runtime Component: UI Runtime Service
 

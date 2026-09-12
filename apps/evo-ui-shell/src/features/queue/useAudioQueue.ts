@@ -15,6 +15,7 @@ import { connectWithRetry, MAX_CONNECT_ATTEMPTS } from "../../runtime/connect-re
 import { DENY_SPECTRUM_PAYLOAD } from "../../runtime/happenings-filter";
 import { t } from "../../runtime/i18n";
 import {
+  decodeEnqueueSelectionOutcome,
   decodeQueueState,
   decodeQueueStateHappening,
   decodeSkipOutcome,
@@ -78,8 +79,10 @@ export interface AudioQueueState {
     selection: Selection,
     mode: EnqueueSelectionMode
   ) => Promise<QueueVerbResult>;
-  /** Paged Container-shape enqueue for network sources (DLNA):
-   *  resolves an opaque container id to tracks page by page. */
+  /** One-shot container enqueue for network sources (DLNA).
+   *  The device resolves the subtree in a single verb; empty
+   *  containers return a visible empty state and leave the queue
+   *  unchanged. */
   enqueueContainer: (
     sourceId: string,
     uri: string,
@@ -301,14 +304,11 @@ export function useAudioQueue(): AudioQueueState {
     [dispatch]
   );
 
-  // Container-shape enqueue for network sources (DLNA MediaServer):
-  // the device resolves an opaque container id to tracks a page at a
-  // time (default 50, hard cap 100) and NEVER in one unbounded shot, so
-  // the UI must drive the pages. The first page carries the requested
-  // mode; every later page appends, so a `replace`/`next` folder keeps
-  // its order (page 0 replaces or inserts-after-current, the rest queue
-  // in sequence behind it). Stops when the response's `next_page` is
-  // null. `uri` is the container's stable id (dlna:<sid>/<oid>).
+  // Container enqueue for a DLNA MediaServer folder. The device
+  // descends the subtree in one verb (`next_page` is always null).
+  // A page loop here would re-issue replace/next against an already
+  // resolved empty-or-full result. `uri` is the container's stable
+  // id (dlna:<sid>/<oid>).
   const enqueueContainer = useCallback(
     async (
       sourceId: string,
@@ -319,28 +319,26 @@ export function useAudioQueue(): AudioQueueState {
       if (transport === null) {
         return { ok: false, message: t("queue.notConnected") };
       }
-      const selection = { kind: "container", uri };
-      let page = 0;
-      // Bound the loop defensively; 100/page hard cap means even a huge
-      // server folder resolves in well under this many iterations.
-      for (let guard = 0; guard < 500; guard++) {
-        const result = await pluginRequest(transport, QUEUE_SHELF, "queue.enqueue_selection", {
+      const result = await pluginRequest(
+        transport,
+        QUEUE_SHELF,
+        "queue.enqueue_selection",
+        {
           v: PAYLOAD_VERSION,
           source_id: sourceId,
-          selection,
-          mode: page === 0 ? mode : "append",
-          page
-        });
-        if (result.error !== undefined) {
-          return { ok: false, message: errorMessage(result.error) };
+          selection: { kind: "container", uri },
+          mode
         }
-        const val = (result.value ?? {}) as Record<string, unknown>;
-        const next = val["next_page"];
-        if (typeof next === "number") {
-          page = next;
-        } else {
-          return { ok: true };
-        }
+      );
+      if (result.error !== undefined) {
+        return { ok: false, message: errorMessage(result.error) };
+      }
+      const outcome = decodeEnqueueSelectionOutcome(result.value);
+      if (outcome === null) {
+        return { ok: false, message: t("queue.containerUnreadable") };
+      }
+      if (outcome.status === "empty") {
+        return { ok: false, message: t("queue.containerEmpty") };
       }
       return { ok: true };
     },

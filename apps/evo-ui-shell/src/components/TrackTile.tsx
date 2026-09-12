@@ -27,6 +27,7 @@ import { formatDurationMs } from "../features/queue/audio-queue-decoders";
 import { ClassicalMetadataStrip } from "../features/classical/ClassicalMetadataStrip";
 import type { ClassicalTags } from "../features/classical/classical-tags";
 import { ScrollingText, type TextOverflowMode } from "./ScrollingText";
+import { CoverImg } from "./CoverImg";
 
 export interface TrackTileProps {
   shape: "row" | "card";
@@ -81,10 +82,6 @@ export interface TrackTileProps {
   primaryActionTitle?: string;
 }
 
-function hideBrokenImg(e: Event): void {
-  (e.currentTarget as HTMLImageElement).style.display = "none";
-}
-
 export function TrackTile({
   shape,
   title,
@@ -120,15 +117,7 @@ export function TrackTile({
   const art = (
     <>
       {placeholderIcon}
-      {artworkUrl !== null ? (
-        <img
-          className="track-tile-thumb-img"
-          src={artworkUrl}
-          alt=""
-          loading="lazy"
-          onError={hideBrokenImg}
-        />
-      ) : null}
+      <CoverImg className="track-tile-thumb-img" src={artworkUrl} />
     </>
   );
 

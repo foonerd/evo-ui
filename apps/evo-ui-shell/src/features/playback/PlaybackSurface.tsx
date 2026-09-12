@@ -24,6 +24,7 @@ import { usePlaylists } from "../playlist/usePlaylists";
 import { usePresentationPlan } from "../../runtime/presentation-context";
 import { rangeFill } from "../../runtime/range-fill";
 import { PlaylistPickerDialog } from "../../components/dialogs";
+import { CoverImg } from "../../components/CoverImg";
 import {
   Visualizer,
   type VisualizerBinCount,
@@ -363,18 +364,11 @@ export function PlaybackSurface({
               * and the gradient placeholder shows through; on a load error
               * we hide the img so the placeholder shows instead. The codec
               * badge + format detail below stay overlaid on top either way. */}
-            {track?.artworkUrl ? (
-              <img
-                className="playback-hero-art-img"
-                src={track.artworkUrl}
-                alt=""
-                onError={(e) => {
-                  (e.currentTarget as HTMLImageElement).style.display = "none";
-                }}
-              />
-            ) : (
-              <HeartbeatMark />
-            )}
+            <CoverImg
+              className="playback-hero-art-img"
+              src={track?.artworkUrl ?? null}
+              fallback={<HeartbeatMark />}
+            />
             {/* Codec chip + rate/depth detail. Both come from
               * the playback warden's audio_playback_stream_format
               * subject. Each renders only when the wire field is

@@ -10,9 +10,10 @@ import { t } from "../../runtime/i18n";
 import {
   providersList,
   providersSetEnabled,
-  providersSetPriority
+  providersSetPriority,
+  providersSetPrivacyMode
 } from "./provider-ops";
-import type { ProviderEntry } from "./provider-decoders";
+import type { ProviderEntry, PrivacyMode } from "./provider-decoders";
 
 export type ProviderActionResult =
   | { ok: true }
@@ -22,6 +23,9 @@ export interface ProvidersState {
   /** null while the first listing is outstanding; [] is a genuine
    *  empty registry, never a failure. */
   entries: ProviderEntry[] | null;
+  /** Device privacy posture from the listing; "enhanced" until the
+   *  first list resolves. Drives suppression rendering. */
+  privacyMode: PrivacyMode;
   error: string | null;
   busy: boolean;
   setEnabled: (
@@ -32,6 +36,7 @@ export interface ProvidersState {
     providerId: string,
     priority: number
   ) => Promise<ProviderActionResult>;
+  setPrivacyMode: (mode: PrivacyMode) => Promise<ProviderActionResult>;
   refresh: () => Promise<void>;
 }
 
@@ -41,6 +46,7 @@ export const DEFAULT_PRIORITY = 100;
 export function useProviders(): ProvidersState {
   const transport = tryUseFrameworkTransport();
   const [entries, setEntries] = useState<ProviderEntry[] | null>(null);
+  const [privacyMode, setPrivacyModeState] = useState<PrivacyMode>("enhanced");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const cancelledRef = useRef(false);
@@ -63,6 +69,7 @@ export function useProviders(): ProvidersState {
           : a.providerId.localeCompare(b.providerId);
       });
       setEntries(sorted);
+      setPrivacyModeState(r.value.privacyMode);
       setError(null);
     } else {
       setError(r.message);
@@ -111,5 +118,28 @@ export function useProviders(): ProvidersState {
     [transport, refresh]
   );
 
-  return { entries, error, busy, setEnabled, setPriority, refresh };
+  const setPrivacyMode = useCallback(
+    async (mode: PrivacyMode): Promise<ProviderActionResult> => {
+      if (transport === null) {
+        return { ok: false, message: t("providers.notConnected") };
+      }
+      setBusy(true);
+      const r = await providersSetPrivacyMode(transport, mode);
+      if (r.ok) await refresh();
+      setBusy(false);
+      return r.ok ? { ok: true } : { ok: false, message: r.message };
+    },
+    [transport, refresh]
+  );
+
+  return {
+    entries,
+    privacyMode,
+    error,
+    busy,
+    setEnabled,
+    setPriority,
+    setPrivacyMode,
+    refresh
+  };
 }

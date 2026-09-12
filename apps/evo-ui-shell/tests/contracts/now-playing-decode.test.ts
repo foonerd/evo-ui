@@ -26,7 +26,11 @@ test("decodeNowPlaying decodes a full playing payload", () => {
       artist: "Artist B",
       album: "Album B",
       mpd_path: "src-a/album-b/01.flac",
-      artwork_url: "/api/v1/audio/artwork/by-mpd-path/abc123/large"
+      // Now-playing hero art is cover identity (album-collapsed) in query
+      // form - the scheme is envelope data, not a baked constant. This is
+      // deliberately NOT the track_detail identity (that is mpd-path).
+      artwork_url:
+        "/api/v1/audio/artwork?scheme=mpd-album&value=Artist%20B%7CAlbum%20B&size=original"
     },
     elapsed_ms: 134000,
     duration_ms: 228000,
@@ -44,7 +48,8 @@ test("decodeNowPlaying decodes a full playing payload", () => {
     artist: "Artist B",
     album: "Album B",
     mpdPath: "src-a/album-b/01.flac",
-    artworkUrl: "/api/v1/audio/artwork/by-mpd-path/abc123/large",
+    artworkUrl:
+      "/api/v1/audio/artwork?scheme=mpd-album&value=Artist%20B%7CAlbum%20B&size=original",
     classical: null
   });
   assert.equal(np?.elapsedMs, 134000);

@@ -1,8 +1,22 @@
 // Settings -> Display & Touch. LOCAL to this physical player: the whole
 // panel is hidden unless inKioskBrowser() (a paired laptop/phone never
-// sees it). Orientation persists immediately (the display rotating is the
-// confirmation); the advanced touch controls batch all three fields per
-// the brief; the wizard is the primary touch-calibration UX.
+// sees it).
+//
+// ONE WRITE PATH. Every control here - orientation, touch, input, power -
+// dispatches the system.kiosk plugin verb, from the glass exactly as from a
+// remote browser. The system.kiosk plugin verbs are the writer.
+// On the binary glass and VM run (evo-kiosk-eng 75796d9) the WebKit touch
+// slots are gone and evo_set_display_rotation is a presence probe. The
+// handlers USED to write these overlays in-process through the same
+// evo-kiosk-config crate, never reaching the framework dispatcher, so nothing
+// could refuse them - a box whose household policy locks system settings could
+// still rotate from its own screen; that ungated piece is still live on the
+// old binary (NUC, Latest testers, remint not named). So the panel does not call them:
+// glass and remote take the one gated route and the one classifier, and a
+// refusal is surfaced rather than silently applied.
+//
+// The advanced touch controls batch all three fields per the brief; the
+// wizard is the primary touch-calibration UX.
 
 import { useEffect, useState } from "preact/hooks";
 import type { JSX } from "preact";
@@ -12,13 +26,9 @@ import { useLocale } from "../../runtime/use-locale";
 import { EvoSelect } from "../../components/EvoSelect";
 import { rangeFill } from "../../runtime/range-fill";
 import { TouchCalibrationWizard } from "./TouchCalibrationWizard";
-import {
-  kioskMode,
-  setDisplayRotation,
-  setTouchCalibration,
-  type Rotation
-} from "./kiosk-bridge";
-import { useKioskRemote } from "./kiosk-remote";
+import { kioskMode, type Rotation } from "./kiosk-bridge";
+import { useKioskRemote, type KioskRemoteResult } from "./kiosk-remote";
+import { classifyKioskWrite } from "./osk-state";
 
 const ROTATIONS: ReadonlyArray<Rotation> = ["0", "90", "180", "270"];
 
@@ -98,8 +108,15 @@ export function KioskDisplayPanel(): JSX.Element {
   const [advOpen, setAdvOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [launch, setLaunch] = useState<"idle" | "launched">("idle");
-  // Set when a remote action can't reach the player (verbs not shipped yet).
-  const [remoteBlocked, setRemoteBlocked] = useState(false);
+  // Set when a display write is refused for a NON-household reason (verdict
+  // "blocked") - the player refused the change. Mode-neutral: the write path
+  // is the plugin verb on glass and remote alike, so the banner shows in both.
+  const [blocked, setBlocked] = useState(false);
+  // Set when a write is refused with household_policy_locked. Distinct from
+  // `blocked`: do not paint that lock as "the player refused" (and never as
+  // 403). The System entry gate is the lock; a stale override sitting is
+  // cleared on the wire and the gate remounts.
+  const [householdLocked, setHouseholdLocked] = useState(false);
 
   // Display + power. These four have no on-glass WebKit handler; both glass
   // and remote drive them over the plugin verb. Values are a last-set cache
@@ -120,9 +137,33 @@ export function KioskDisplayPanel(): JSX.Element {
     () => lsGet("evo.kiosk.inhibit") !== "0"
   );
   const [pendingDisable, setPendingDisable] = useState(false);
+  // On-screen keyboard. Starts null (unknown) - NOT seeded from localStorage:
+  // an absent osk_enabled in the device read keeps it null and disables the
+  // row, so we never invent On. Becomes boolean only from the read or a write.
+  const [oskEnabled, setOskEnabled] = useState<boolean | null>(null);
+  // Mouse pointer. Same rule as OSK: null (absent key / old verb) disables the
+  // row; never seeded from localStorage. The write applies at kiosk restart.
+  const [cursorVisible, setCursorVisible] = useState<boolean | null>(null);
 
-  const noteRemote = (res: { ok: boolean }): void => {
-    setRemoteBlocked(!res.ok);
+  // Classify a kiosk write: household_policy_locked is not the refused
+  // banner; any other failure is. Success clears both. Returns the verdict
+  // so callers commit only on "ok".
+  const settle = (res: KioskRemoteResult) => {
+    const verdict = classifyKioskWrite(res);
+    setHouseholdLocked(verdict === "locked");
+    setBlocked(verdict === "blocked");
+    return verdict;
+  };
+  // Apply a control write and commit the new value ONLY on success - no
+  // optimistic tick. A refusal leaves the control as it was and surfaces the
+  // reason through settle().
+  const runRemote = (
+    write: () => Promise<KioskRemoteResult>,
+    commit: () => void
+  ): void => {
+    void write().then((res) => {
+      if (settle(res) === "ok") commit();
+    });
   };
 
   // Seed the panel from the DEVICE on mount (get_display_state), so a fresh
@@ -156,6 +197,16 @@ export function KioskDisplayPanel(): JSX.Element {
       lsSet("evo.kiosk.inhibit", s.sleepInhibitWhilePlaying ? "1" : "0");
       setKioskEnabled(s.enabled);
       lsSet("evo.kiosk.enabled", s.enabled ? "1" : "0");
+      // osk_enabled may be null (a player on the old verb): keep null so the
+      // row stays disabled. Cache only a real boolean - never invent On.
+      setOskEnabled(s.oskEnabled);
+      if (typeof s.oskEnabled === "boolean") {
+        lsSet("evo.kiosk.osk", s.oskEnabled ? "1" : "0");
+      }
+      setCursorVisible(s.cursorVisible);
+      if (typeof s.cursorVisible === "boolean") {
+        lsSet("evo.kiosk.cursor", s.cursorVisible ? "1" : "0");
+      }
     });
     return () => {
       live = false;
@@ -164,33 +215,73 @@ export function KioskDisplayPanel(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Brightness is a drag slider, not a tick: keep the live echo so the thumb
+  // tracks the finger. A household lock is classified, not painted as 403
+  // (the device value re-seeds from get on remount).
   const applyBrightness = (p: number): void => {
     const c = clampBrightness(p);
     setBrightness(c);
     lsSet("evo.kiosk.brightness", String(c));
-    void remote.setBrightness(c).then(noteRemote);
+    void remote.setBrightness(c).then(settle);
   };
 
   const applySleep = (enabled: boolean, seconds: number): void => {
     const s = clampSleep(seconds);
-    setSleepEnabled(enabled);
-    setSleepSeconds(s);
-    lsSet("evo.kiosk.sleepEnabled", enabled ? "1" : "0");
-    lsSet("evo.kiosk.sleepSeconds", String(s));
     // 0 tells the plugin "never sleep"; otherwise the timeout.
-    void remote.setSleepTimeout(enabled ? s : 0).then(noteRemote);
+    runRemote(
+      () => remote.setSleepTimeout(enabled ? s : 0),
+      () => {
+        setSleepEnabled(enabled);
+        setSleepSeconds(s);
+        lsSet("evo.kiosk.sleepEnabled", enabled ? "1" : "0");
+        lsSet("evo.kiosk.sleepSeconds", String(s));
+      }
+    );
   };
 
   const applyInhibit = (b: boolean): void => {
-    setInhibit(b);
-    lsSet("evo.kiosk.inhibit", b ? "1" : "0");
-    void remote.setSleepInhibitWhilePlaying(b).then(noteRemote);
+    runRemote(
+      () => remote.setSleepInhibitWhilePlaying(b),
+      () => {
+        setInhibit(b);
+        lsSet("evo.kiosk.inhibit", b ? "1" : "0");
+      }
+    );
   };
 
   const commitEnabled = (b: boolean): void => {
-    setKioskEnabled(b);
-    lsSet("evo.kiosk.enabled", b ? "1" : "0");
-    void remote.setEnabled(b).then(noteRemote);
+    runRemote(
+      () => remote.setEnabled(b),
+      () => {
+        setKioskEnabled(b);
+        lsSet("evo.kiosk.enabled", b ? "1" : "0");
+      }
+    );
+  };
+
+  // On-screen keyboard: NO optimistic tick. The toggle flips only after the
+  // write succeeds; a refusal leaves it as it was and settle() shows why
+  // (household lock, or the honest unavailable banner).
+  const applyOsk = (enabled: boolean): void => {
+    runRemote(
+      () => remote.setOsk(enabled),
+      () => {
+        setOskEnabled(enabled);
+        lsSet("evo.kiosk.osk", enabled ? "1" : "0");
+      }
+    );
+  };
+
+  // Mouse pointer: writes the overlay (applies at kiosk restart). Same
+  // commit-on-success rule as OSK - no optimistic tick.
+  const applyCursor = (visible: boolean): void => {
+    runRemote(
+      () => remote.setCursor(visible),
+      () => {
+        setCursorVisible(visible);
+        lsSet("evo.kiosk.cursor", visible ? "1" : "0");
+      }
+    );
   };
 
   // Disabling kiosk stops the compositor session. From the glass that blacks
@@ -204,24 +295,37 @@ export function KioskDisplayPanel(): JSX.Element {
     commitEnabled(b);
   };
 
+  // Orientation. Same gated plugin write from the glass as from a remote
+  // browser - no mode branch, because a household lock has to be able to
+  // refuse a rotate performed on the box itself. Commit-on-success: the
+  // radio moves only once the player accepts the write, so a refusal leaves
+  // the control where it was instead of showing a rotation that never
+  // happened.
   const pickOrientation = (r: Rotation): void => {
-    setRotation(r);
-    lsSet("evo.kiosk.rotation", r);
-    if (isRemote) void remote.setDisplayRotation(r).then(noteRemote);
-    else setDisplayRotation(r);
+    runRemote(
+      () => remote.setDisplayRotation(r),
+      () => {
+        setRotation(r);
+        lsSet("evo.kiosk.rotation", r);
+      }
+    );
   };
 
-  // Batched apply: every touch change sends all three fields in one call
-  // (WebKit handler on the glass; wire op from a remote browser).
+  // Batched apply: every touch change sends all three fields in one call,
+  // over the same gated plugin write from glass and remote alike, and the
+  // cache is written only once the player accepts it.
   const applyTouch = (r: Rotation, h: boolean, v: boolean): void => {
-    setTouchRotation(r);
-    setHflip(h);
-    setVflip(v);
-    lsSet("evo.kiosk.touchRotation", r);
-    lsSet("evo.kiosk.hflip", h ? "1" : "0");
-    lsSet("evo.kiosk.vflip", v ? "1" : "0");
-    if (isRemote) void remote.setTouchCalibration(r, h, v).then(noteRemote);
-    else setTouchCalibration(r, h, v);
+    runRemote(
+      () => remote.setTouchCalibration(r, h, v),
+      () => {
+        setTouchRotation(r);
+        setHflip(h);
+        setVflip(v);
+        lsSet("evo.kiosk.touchRotation", r);
+        lsSet("evo.kiosk.hflip", h ? "1" : "0");
+        lsSet("evo.kiosk.vflip", v ? "1" : "0");
+      }
+    );
   };
 
   // On the glass the wizard captures corners here; from a remote browser we
@@ -229,13 +333,15 @@ export function KioskDisplayPanel(): JSX.Element {
   // device digitiser) and tell the operator to walk over and tap.
   const onCalibrate = (): void => {
     if (!isRemote) {
+      // This panel only mounts behind the System household gate. Unlocked
+      // means unlocked: Calibrate opens the wizard. A second household
+      // ask here would undo the override sitting. Never Pair.
       setWizardOpen(true);
       return;
     }
     setLaunch("idle");
     void remote.launchCalibration().then((res) => {
-      noteRemote(res);
-      if (res.ok) setLaunch("launched");
+      if (settle(res) === "ok") setLaunch("launched");
     });
   };
 
@@ -244,9 +350,13 @@ export function KioskDisplayPanel(): JSX.Element {
       <p className="feature-description settings-help">
         {isRemote ? t("kiosk.remoteHint") : t("kiosk.localOnly")}
       </p>
-      {isRemote && remoteBlocked ? (
+      {/* A non-household refusal ("blocked") shows in BOTH modes: the write
+          path is the plugin verb on glass and remote alike, so the copy is
+          mode-neutral and honest - the player refused this change. It never
+          says "use the other screen". */}
+      {blocked && !householdLocked ? (
         <p className="feature-description settings-help net-notice kiosk-remote-blocked">
-          {t("kiosk.remoteUnavailable")}
+          {t("kiosk.displayRefused")}
         </p>
       ) : null}
 
@@ -331,6 +441,37 @@ export function KioskDisplayPanel(): JSX.Element {
           {t("kiosk.calLaunched")}
         </p>
       ) : null}
+
+      <div className="kiosk-section">
+        <span className="kiosk-section-label">{t("kiosk.input")}</span>
+        <div className="kiosk-adv-row">
+          <span>{t("kiosk.onScreenKeyboard")}</span>
+          <button
+            type="button"
+            className={"evo-toggle" + (oskEnabled === true ? " on" : "")}
+            aria-pressed={oskEnabled === true}
+            disabled={oskEnabled === null}
+            onClick={() => applyOsk(!(oskEnabled === true))}
+          >
+            {oskEnabled === true ? t("kiosk.on") : t("kiosk.off")}
+          </button>
+        </div>
+        <div className="kiosk-adv-row">
+          <span>{t("kiosk.mousePointer")}</span>
+          <button
+            type="button"
+            className={"evo-toggle" + (cursorVisible === true ? " on" : "")}
+            aria-pressed={cursorVisible === true}
+            disabled={cursorVisible === null}
+            onClick={() => applyCursor(!(cursorVisible === true))}
+          >
+            {cursorVisible === true ? t("kiosk.on") : t("kiosk.off")}
+          </button>
+        </div>
+        {cursorVisible !== null ? (
+          <p className="settings-help">{t("kiosk.pointerHint")}</p>
+        ) : null}
+      </div>
 
       <div className="kiosk-section">
         <span className="kiosk-section-label">{t("kiosk.power")}</span>

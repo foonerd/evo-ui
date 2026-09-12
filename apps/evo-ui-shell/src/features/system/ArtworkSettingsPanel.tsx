@@ -14,13 +14,11 @@
 
 import { useState } from "preact/hooks";
 import { ImageOff, Ruler } from "lucide-preact";
-import { tryUseFrameworkTransport } from "../../runtime/framework-transport";
-import { pluginRequest } from "../../runtime/plugin-request-codec";
-import type { WireOpResult } from "../../sdk/types";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 import {
   ARTWORK_SIZES,
+  clearArtwork,
   readArtworkSize,
   writeArtworkSize,
   type ArtworkSize
@@ -28,7 +26,6 @@ import {
 
 export function ArtworkSettingsPanel() {
   useLocale();
-  const transport = tryUseFrameworkTransport();
   const [size, setSize] = useState<ArtworkSize>(() => readArtworkSize());
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<string>("");
@@ -39,40 +36,17 @@ export function ArtworkSettingsPanel() {
   };
 
   const clearCache = async (): Promise<void> => {
-    if (transport === null) {
-      setFeedback(t("artwork.notConnected"));
-      return;
-    }
     if (busy) return;
     setBusy(true);
     setFeedback("");
-    // The clear verbs succeed at the framework level; artwork.local's
-    // clear response does not carry a payload_b64 envelope, so
-    // pluginRequest reports `plugin_response_decode` even though the
-    // clear ran. Treat that specific decode code as success - the op
-    // completed; only its (empty) body was undecodable.
-    const ran = (r: WireOpResult): boolean =>
-      r.error === undefined || r.error.code === "plugin_response_decode";
-    // Both clear verbs are stocked on the multi-occupant
-    // "artwork.providers" shelf (artwork.local + artwork.online).
-    const local = await pluginRequest(
-      transport,
-      "artwork.providers",
-      "artwork.local.clear_cache",
-      { v: 1 }
-    );
-    const online = await pluginRequest(
-      transport,
-      "artwork.providers",
-      "artwork.online.clear_cache",
-      { v: 1 }
-    );
+    // All-scope eviction via the one authenticated destructive gesture.
+    // Removes downloaded artwork across every tier (resolve-index entries,
+    // asset bytes, plugin memo); local folder/embedded art is a different
+    // plugin and is kept. Only a real 2xx is reported as success - a
+    // capability refusal must never read as "cleared".
+    const r = await clearArtwork();
     setBusy(false);
-    if (ran(local) && ran(online)) {
-      setFeedback(t("artwork.cacheCleared"));
-    } else {
-      setFeedback(t("artwork.cacheClearFailed"));
-    }
+    setFeedback(r.ok ? t("artwork.cacheCleared") : t("artwork.cacheClearFailed"));
   };
 
   return (
@@ -110,7 +84,7 @@ export function ArtworkSettingsPanel() {
       <button
         type="button"
         className="library-action-danger"
-        disabled={busy || transport === null}
+        disabled={busy}
         onClick={() => void clearCache()}
       >
         {busy ? t("artwork.clearCache.working") : t("artwork.clearCache.action")}

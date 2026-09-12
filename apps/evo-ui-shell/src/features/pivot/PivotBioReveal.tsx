@@ -17,7 +17,7 @@ export function PivotBioReveal() {
   useLocale();
   const { nowPlaying } = usePlayback();
   const track = nowPlaying?.track ?? null;
-  const { detail, phase } = useTrackDetail(track?.mpdPath ?? null);
+  const { detail, phase } = useTrackDetail("mpd-path", track?.mpdPath ?? null);
 
   return (
     <div className="pivot-bio pivot-bio-scroll">

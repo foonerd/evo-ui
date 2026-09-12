@@ -50,8 +50,17 @@ export interface ProviderEntry {
   license: string | null;
 }
 
+/** Device-wide privacy posture, top-level on the listing.
+ *  "enhanced" = all providers allowed;
+ *  "anonymous_only" = identity-bearing providers suppressed;
+ *  "offline" = every network provider suppressed. Unknown/absent
+ *  decodes to "enhanced" (the permissive default), so a missing field
+ *  never fabricates a suppressed state. */
+export type PrivacyMode = "enhanced" | "anonymous_only" | "offline";
+
 export interface ProviderListing {
   entries: ProviderEntry[];
+  privacyMode: PrivacyMode;
 }
 
 function decodeEntry(raw: unknown): ProviderEntry | null {
@@ -96,5 +105,8 @@ export function decodeProviderListing(raw: unknown): ProviderListing | null {
       if (decoded !== null) entries.push(decoded);
     }
   }
-  return { entries };
+  const pm = raw["privacy_mode"];
+  const privacyMode: PrivacyMode =
+    pm === "anonymous_only" || pm === "offline" ? pm : "enhanced";
+  return { entries, privacyMode };
 }

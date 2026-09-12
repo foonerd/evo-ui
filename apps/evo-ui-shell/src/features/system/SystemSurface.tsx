@@ -28,6 +28,8 @@ import { NotificationSettingsRows } from "../notifications/NotificationSettingsR
 import { KioskDisplayPanel } from "../kiosk/KioskDisplayPanel";
 import { inKioskBrowser } from "../kiosk/kiosk-bridge";
 import { PairingSettingsRow } from "../pairing/PairingSettingsRow";
+import { HouseholdSettingsRow } from "../household/HouseholdSettingsRow";
+import { HouseholdSurfaceGate } from "../household/HouseholdSurfaceGate";
 import { NetworkLanding } from "../network/NetworkLanding";
 import { SmbServerSurface } from "../sources/SmbServerSurface";
 import {
@@ -38,6 +40,7 @@ import {
   DownloadCloud,
   Lock,
   MonitorSmartphone,
+  Plane,
   Power,
   RotateCcw,
   Unlock,
@@ -80,6 +83,7 @@ type SettingsGroupId =
   | "metadata"
   | "smart-home"
   | "system"
+  | "security"
   | "activity"
   | "about";
 
@@ -99,6 +103,7 @@ const SETTINGS_GROUPS: ReadonlyArray<SettingsGroupId> = [
   "metadata",
   "smart-home",
   "system",
+  "security",
   "activity",
   "about"
 ] as const;
@@ -191,6 +196,7 @@ export function SystemSurface({
       metadata: "partial",
       "smart-home": "coming",
       system: "partial",
+      security: "available",
       activity: "available",
       about: "available"
     };
@@ -390,6 +396,23 @@ function GroupLanding({ groups, availability, onPick }: GroupLandingProps) {
   );
 }
 
+/* ---------- Security group: authorise this browser + household lockdown ---------- */
+// Two rows, two ceremonies - both are device security, so both live here off
+// the System group. First: PairingSettingsRow authorises THIS browser with the
+// player's system password (PairDeviceFlow, unchanged). Second:
+// HouseholdSettingsRow is the household-lockdown door - how locked-down this
+// player is + lend / unlock - which opens the one household modal, never Pair.
+// The two stay distinct: neither is merged into the other, "authorise this
+// browser" is not renamed to cover lockdown, and no reset/unlock is invented.
+function SecurityGroup() {
+  return (
+    <>
+      <PairingSettingsRow />
+      <HouseholdSettingsRow />
+    </>
+  );
+}
+
 /* ---------- Content: per-group sub-pages ---------- */
 
 interface GroupContentProps {
@@ -454,6 +477,7 @@ function GroupContent(props: GroupContentProps) {
         ) : null}
       </div>
 
+      <HouseholdSurfaceGate group={props.group}>
       {props.group === "audio" ? <AudioGroup {...props} /> : null}
       {props.group === "file-sharing" ? <SmbServerSurface /> : null}
       {props.group === "network" ? <NetworkGroup {...props} /> : null}
@@ -524,12 +548,14 @@ function GroupContent(props: GroupContentProps) {
       {props.group === "system" ? (
         <SystemGroup diagnostics={props.diagnostics} />
       ) : null}
+      {props.group === "security" ? <SecurityGroup /> : null}
       {props.group === "activity" ? (
         <>
           <DomainHistoryView />
           <DispositionPanel />
         </>
       ) : null}
+      </HouseholdSurfaceGate>
     </div>
   );
 }
@@ -564,6 +590,22 @@ function SettingsPowerStage() {
         <Power size={18} />
         <span>{t("app.powerOff")}</span>
       </button>
+      {power.flightAvailable ? (
+        <button
+          type="button"
+          className={
+            "pivot-tile" + (power.flightEnabled ? " pivot-tile-on" : "")
+          }
+          aria-pressed={power.flightEnabled}
+          title={t("app.flightMode")}
+          onClick={() =>
+            power.setConfirm(power.flightEnabled ? "flight_off" : "flight_on")
+          }
+        >
+          <Plane size={18} />
+          <span>{t("app.flightMode")}</span>
+        </button>
+      ) : null}
       <SystemPowerConfirmModal
         confirm={power.confirm}
         busy={power.busy}
@@ -604,28 +646,6 @@ function AudioGroup({
       />
     </>
   );
-}
-
-// Turn a raw framework refusal into an operator-readable notice. The
-// device gates network changes (and, today, scan) behind a step-up
-// scope; surfacing the raw "principal does not hold the write scope"
-// string is meaningless on glass. Map any step-up / scope / permission
-// refusal to a plain sentence; pass anything else through unchanged.
-// A capability/scope/step-up refusal from a network shelf verb means
-// this session's bearer does not carry network_admin - the framework
-// gates shelf verbs on the bearer alone, so the remedy is pairing (to
-// obtain an operator bearer), NOT an inline password. See
-// step-up-dispatch.ts for the code-truth on why the password card was
-// a dead-end here.
-function isNetworkAuthError(msg: string): boolean {
-  return /step.?up|scope|permission|denied|unauthori|not.hold/i.test(msg);
-}
-
-function humaniseNetworkError(msg: string): string {
-  if (isNetworkAuthError(msg)) {
-    return t("settings.network.authNeeded");
-  }
-  return msg;
 }
 
 // A scan row is an open network when it advertises no security. The
@@ -814,12 +834,13 @@ function SystemGroup({
         * card. */}
       {/* Notification behaviour rows (Phase 2c, ruled N2-A): mode,
         * quiet hours, downgrade. Behaviour, not appearance - so
-        * they live here, not in the designer. */}
+        * they live here, not in the designer. They dispatch system
+        * writes (set_base_mode, quiet hours), so they mute with the
+        * same lock as the stage below; kept above the rail so nav
+        * stays live. */}
       <NotificationSettingsRows />
-      {/* Session-trust pairing: pair THIS browser with the player -
-        * code ceremony for screened devices, bootstrap preseed for
-        * headless. */}
-      <PairingSettingsRow />
+      {/* Pairing AND household lockdown both live on the Security tile (own
+        * group) now - both are device security. System hosts neither. */}
       <nav className="audio-rail" aria-label={t("settings.system.operationsAria")}>
         {visibleStages.map((id, i) => {
           const isActive = activeStage === id;

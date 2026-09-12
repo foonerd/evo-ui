@@ -1,25 +1,22 @@
-// Single source of truth for "this refusal means the operator must
-// step up." The framework refuses a scope/step-up-gated verb at the
-// dispatch boundary with wire code `permission_denied` (evidence:
-// evo-runtime-http ws_endpoint.rs maps DispatchError::Forbidden ->
-// "permission_denied"; the ResponseOutcome::Err carries only
-// { code, message } - no subclass). Some trust-path refusals instead
-// carry subclass `step_up_required`. Either one means: raise the
-// operator-password card and retry.
+// Single source of truth for "this refusal means the operator must step
+// up" - i.e. raise the operator-password card and retry the op with a
+// step_up_token.
 //
-// In this appliance the operator password IS the OS user's password
-// and is the top authority - every capability scope (network_admin,
-// system.admin, plugins_admin, ...) is grantable by a successful
-// step-up. So a `permission_denied` is always "authenticate to
-// proceed", never a dead end. That is why one predicate, not a
-// per-scope table, is correct here.
+// NARROW predicate (fixed 2026): ONLY the explicit `step_up_required`
+// subclass raises the card. A bare `permission_denied` is NOT
+// step-up-curable - the framework returns it for wrong-password,
+// rate-limit (`step_up_rate_limited`), schema-gate misses, a capability
+// the bearer will never gain by typing a password, and
+// `release_user_interaction_responder` on a LAN-trust socket. Treating
+// every `permission_denied` as "raise the card" stacked the step-up card
+// on top of Pair (and on PromptSurface's always-mounted release cleanup)
+// on every surface - an unbreakable authentication loop. A
+// capability/scope refusal is cured by the surface (pair to obtain a
+// bearer that carries the scope), never by this card.
 
 import type { WireOpError } from "../sdk/types";
 
 export function isElevationRequired(error: WireOpError | undefined): boolean {
   if (error === undefined) return false;
-  return (
-    error.code === "permission_denied" ||
-    error.subclass === "step_up_required"
-  );
+  return error.subclass === "step_up_required";
 }

@@ -12,6 +12,7 @@
 
 import type { Transport } from "../sdk/transport";
 import type { CallOpts, SubscribeOpts, WireOpResult } from "../sdk/types";
+import { liftErrorSubclass } from "./wire-error.ts";
 
 type HttpVerb = "GET" | "POST" | "PUT" | "DELETE";
 
@@ -142,15 +143,20 @@ export class HttpTransport implements Transport {
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
-      return {
-        error: {
-          code: deriveErrorCode(resp.status),
-          message:
-            text.length > 0
-              ? text
-              : `HTTP ${resp.status} ${resp.statusText}`,
-        },
+      const err: { code: string; message: string; subclass?: string } = {
+        code: deriveErrorCode(resp.status),
+        message:
+          text.length > 0 ? text : `HTTP ${resp.status} ${resp.statusText}`,
       };
+      // The structured refusal subclass rides the JSON error body even on a
+      // 4xx (step_up_required comes back on a 403). Lift it - same reader and
+      // same locations as the WS decode - so the shared step-up path raises
+      // the password card instead of surfacing a bare permission_denied.
+      const sub = subclassFromErrorBody(text);
+      if (sub !== undefined) {
+        err.subclass = sub;
+      }
+      return { error: err };
     }
     const text = await resp.text();
     if (text.length === 0) {
@@ -186,6 +192,30 @@ export class HttpTransport implements Transport {
       }),
     };
   }
+}
+
+// Pull the refusal subclass out of an HTTP error body, wherever it sits:
+// under `error` ({error:{...details.subclass}} or {error:{subclass}}) or bare
+// at the top level. Mirrors the framework's own reader; missing/unparseable
+// bodies yield undefined (the caller keeps the status-derived code).
+function subclassFromErrorBody(text: string): string | undefined {
+  if (text.length === 0) return undefined;
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return undefined;
+  }
+  const obj = body as Record<string, unknown>;
+  const errObj = obj["error"];
+  if (typeof errObj === "object" && errObj !== null && !Array.isArray(errObj)) {
+    const nested = liftErrorSubclass(errObj as Record<string, unknown>);
+    if (nested !== undefined) return nested;
+  }
+  return liftErrorSubclass(obj);
 }
 
 function deriveErrorCode(status: number): string {
