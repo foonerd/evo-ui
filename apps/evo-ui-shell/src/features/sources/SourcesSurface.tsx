@@ -513,8 +513,8 @@ function AddShareDialog({
     host.trim().length > 0 &&
     path.trim().length > 0 &&
     (credKind === "guest" || username.trim().length > 0);
-  // Fail-closed: a user+password submit needs the credential prompt, which only
-  // a responder-holding session can paint. Guest proceeds. Not a Pair path.
+  // Valid form starts. User+password prompt paints on the responder
+  // (usually the player), not only on this session. Not a Pair path.
   const canStart = canStartShareAdd({ valid, credKind, responderGranted });
   const showResponderNotice = showCredentialResponderNotice({
     credKind,
@@ -530,10 +530,10 @@ function AddShareDialog({
         onSubmit={(event) => {
           event.preventDefault();
           if (!canStart) return;
-          // Vault key derived from the alias - the vault entry the
-          // plugin resolves the password from. Stocking that entry
-          // is the framework's promised prompt flow (not yet
-          // implemented plugin-side; vault-miss renders on the card).
+          // Vault key derived from the alias. network.share.add
+          // persists, then mount_share → ensure_credential_stocked.
+          // The password is prompted on the responder, stored in
+          // the vault file, never on this form and never on argv.
           const slug = alias.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
           onSubmit({
             alias: alias.trim(),
@@ -681,7 +681,7 @@ function AddShareDialog({
               />
             </label>
             {showResponderNotice ? (
-              <p className="evo-modal-hint sources-form-blocked" role="alert">
+              <p className="evo-modal-hint sources-form-notice" role="note">
                 {t("sources.form.credentialsNeedResponder")}
               </p>
             ) : (

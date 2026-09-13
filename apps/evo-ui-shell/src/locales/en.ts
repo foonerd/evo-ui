@@ -622,7 +622,7 @@ export const en = {
   "sources.form.domain": "Domain (optional)",
   "sources.form.domainHint": "Only for domain-joined NAS, e.g. CORP",
   "sources.form.passwordViaPrompt": "The password is asked for separately by the device after you submit - it never travels through this form.",
-  "sources.form.credentialsNeedResponder": "This screen cannot ask for the share password right now - the player is taking prompts on another screen. Add a user and password share from the player's screen.",
+  "sources.form.credentialsNeedResponder": "After you submit, enter the share password on the player - this screen cannot ask for it while the player is taking prompts.",
   "sources.form.advanced": "Advanced options",
   "sources.form.addAndMount": "Add and mount",
   "sources.form.save": "Save changes",
