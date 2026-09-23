@@ -26,8 +26,10 @@ import { t } from "../../runtime/i18n";
 import type { CalibrationSample } from "./kiosk-bridge";
 import { useKioskRemote } from "./kiosk-remote";
 import {
+  KIOSK_CAL_WRITE_DEADLINE_MS,
   classifyKioskWrite,
   readDerivedCalibration,
+  settleKioskCalWrite,
   type DerivedCalibration
 } from "./osk-state";
 import { useHouseholdModal } from "../household/HouseholdModalHost";
@@ -92,7 +94,15 @@ export function TouchCalibrationWizard(props: {
     if (phase !== "reset") return;
     let live = true;
     let id: ReturnType<typeof setTimeout> | undefined;
-    void remote.setTouchCalibration("0", false, false).then((res) => {
+    const ac = new AbortController();
+    const deadline = window.setTimeout(
+      () => ac.abort(),
+      KIOSK_CAL_WRITE_DEADLINE_MS
+    );
+    void settleKioskCalWrite(
+      remote.setTouchCalibration("0", false, false, { signal: ac.signal }),
+      ac.signal
+    ).then((res) => {
       if (!live) return;
       switch (classifyKioskWrite(res)) {
         case "ok":
@@ -104,12 +114,18 @@ export function TouchCalibrationWizard(props: {
           onLocked();
           return;
         default:
-          setErrorMsg(res.message ?? t("kiosk.displayRefused"));
+          setErrorMsg(
+            res.message === "aborted"
+              ? t("kiosk.cal.noReply")
+              : (res.message ?? t("kiosk.displayRefused"))
+          );
           setPhase("error");
       }
     });
     return () => {
       live = false;
+      ac.abort();
+      window.clearTimeout(deadline);
       if (id !== undefined) clearTimeout(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -120,34 +136,50 @@ export function TouchCalibrationWizard(props: {
   useEffect(() => {
     if (phase !== "submitting") return;
     let live = true;
-    void remote
-      .deriveTouchCalibrationFromCorners(samplesRef.current)
-      .then((res) => {
-        if (!live) return;
-        switch (classifyKioskWrite(res)) {
-          case "ok": {
-            const d = readDerivedCalibration(res.value);
-            if (d === null) {
-              // Accepted but unreadable: report it rather than paint a
-              // triple we made up.
-              setErrorMsg(t("kiosk.cal.unreadable"));
-              setPhase("error");
-              return;
-            }
-            setDerived(d);
-            setPhase("confirm");
+    const ac = new AbortController();
+    const deadline = window.setTimeout(
+      () => ac.abort(),
+      KIOSK_CAL_WRITE_DEADLINE_MS
+    );
+    void settleKioskCalWrite(
+      remote.deriveTouchCalibrationFromCorners(samplesRef.current, {
+        signal: ac.signal
+      }),
+      ac.signal
+    ).then((res) => {
+      if (!live) return;
+      switch (classifyKioskWrite(res)) {
+        case "ok": {
+          const d = readDerivedCalibration(
+            "value" in res ? res.value : undefined
+          );
+          if (d === null) {
+            // Accepted but unreadable: report it rather than paint a
+            // triple we made up.
+            setErrorMsg(t("kiosk.cal.unreadable"));
+            setPhase("error");
             return;
           }
-          case "locked":
-            onLocked();
-            return;
-          default:
-            setErrorMsg(res.message ?? t("kiosk.displayRefused"));
-            setPhase("error");
+          setDerived(d);
+          setPhase("confirm");
+          return;
         }
-      });
+        case "locked":
+          onLocked();
+          return;
+        default:
+          setErrorMsg(
+            res.message === "aborted"
+              ? t("kiosk.cal.noReply")
+              : (res.message ?? t("kiosk.displayRefused"))
+          );
+          setPhase("error");
+      }
+    });
     return () => {
       live = false;
+      ac.abort();
+      window.clearTimeout(deadline);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);

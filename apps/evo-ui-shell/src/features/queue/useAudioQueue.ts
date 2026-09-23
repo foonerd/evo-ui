@@ -66,11 +66,14 @@ export interface AudioQueueState {
    *  means the read itself failed, not "queue is empty". */
   queue: QueueState | null;
   enqueue: (uris: string[], position?: number) => Promise<QueueVerbResult>;
-  /** Replace-and-play: clear the queue, load these URIs, and play
-   *  from the top. Composed from clear_queue + enqueue +
-   *  play_from_position (the framework has no atomic replace verb
-   *  yet); each step aborts on the first failure. */
+  /** Clear and play (queue scope) for explicit URIs: clear the
+   *  live queue, load these URIs, play from the top. Composed
+   *  from clear_queue + enqueue + play_from_position; each step
+   *  aborts on the first failure. */
   playNow: (uris: string[]) => Promise<QueueVerbResult>;
+  /** Play now for explicit URIs: append, then play from the first
+   *  newly added item. The live queue is not cleared. */
+  appendAndPlay: (uris: string[]) => Promise<QueueVerbResult>;
   /** Multi-dimensional, server-side enqueue: the plugin resolves the
    *  selection to tracks and applies the mode in one MPD roundtrip
    *  (replace = atomic clear+add+play). Scale-safe - no URI list on
@@ -78,6 +81,12 @@ export interface AudioQueueState {
   enqueueSelection: (
     selection: Selection,
     mode: EnqueueSelectionMode
+  ) => Promise<QueueVerbResult>;
+  /** Play now for a browse selection: append via enqueue_selection,
+   *  then play from the first newly added item. Empty selections
+   *  leave the queue untouched. */
+  appendAndPlaySelection: (
+    selection: Selection
   ) => Promise<QueueVerbResult>;
   /** One-shot container enqueue for network sources (DLNA).
    *  The device resolves the subtree in a single verb; empty
@@ -87,6 +96,13 @@ export interface AudioQueueState {
     sourceId: string,
     uri: string,
     mode: EnqueueSelectionMode
+  ) => Promise<QueueVerbResult>;
+  /** Play now for a DLNA container: append the subtree, then play
+   *  from the first newly added item. Empty containers leave the
+   *  queue untouched. */
+  appendAndPlayContainer: (
+    sourceId: string,
+    uri: string
   ) => Promise<QueueVerbResult>;
   removeItem: (id: number) => Promise<QueueVerbResult>;
   moveItem: (id: number, toPosition: number) => Promise<QueueVerbResult>;
@@ -104,6 +120,16 @@ export interface AudioQueueState {
    *  result. Used by the surface's reload button + any surface
    *  observing an invariant violation. */
   refresh: () => Promise<QueueVerbResult>;
+}
+
+/** Status line from queue.enqueue_selection. Criteria and
+ *  container both publish status; empty means the queue was
+ *  not written. */
+function enqueueSelectionStatusOf(v: unknown): "ok" | "empty" | null {
+  if (typeof v !== "object" || v === null) return null;
+  const status = (v as Record<string, unknown>)["status"];
+  if (status === "ok" || status === "empty") return status;
+  return null;
 }
 
 function errorMessage(error: unknown): string {
@@ -128,6 +154,8 @@ export function useAudioQueue(): AudioQueueState {
   });
   const [queue, setQueue] = useState<QueueState | null>(null);
   const transportRef = useRef<WsTransport | null>(null);
+  const queueRef = useRef<QueueState | null>(null);
+  queueRef.current = queue;
 
   useEffect(() => {
     if (!secondaryLive) {
@@ -304,6 +332,36 @@ export function useAudioQueue(): AudioQueueState {
     [dispatch]
   );
 
+  const enqueueSelectionStatus = useCallback(
+    async (
+      selection: Selection,
+      mode: EnqueueSelectionMode
+    ): Promise<QueueVerbResult> => {
+      const transport = transportRef.current;
+      if (transport === null) {
+        return { ok: false, message: t("queue.notConnected") };
+      }
+      const result = await pluginRequest(
+        transport,
+        QUEUE_SHELF,
+        "queue.enqueue_selection",
+        { v: PAYLOAD_VERSION, selection, mode }
+      );
+      if (result.error !== undefined) {
+        return { ok: false, message: errorMessage(result.error) };
+      }
+      const status = enqueueSelectionStatusOf(result.value);
+      if (status === "empty") {
+        return { ok: false, message: t("queue.selectionEmpty") };
+      }
+      if (status !== "ok") {
+        return { ok: false, message: t("queue.containerUnreadable") };
+      }
+      return { ok: true };
+    },
+    []
+  );
+
   // Container enqueue for a DLNA MediaServer folder. The device
   // descends the subtree in one verb (`next_page` is always null).
   // A page loop here would re-issue replace/next against an already
@@ -377,7 +435,10 @@ export function useAudioQueue(): AudioQueueState {
 
   const saveAsPlaylist = useCallback(
     (playlistName: string) =>
-      dispatch("queue.save_queue_as_playlist", { playlist_name: playlistName }),
+      dispatch("queue.save_queue_as_playlist", {
+        playlist_name: playlistName,
+        overwrite: true
+      }),
     [dispatch]
   );
 
@@ -385,6 +446,55 @@ export function useAudioQueue(): AudioQueueState {
     (position: number) => dispatch("queue.play_from_position", { position }),
     [dispatch]
   );
+
+  const appendAndPlay = useCallback(
+    async (uris: string[]): Promise<QueueVerbResult> => {
+      if (uris.length === 0) {
+        return { ok: false, message: t("queue.selectionEmpty") };
+      }
+      const current = queueRef.current;
+      if (current === null) {
+        return { ok: false, message: t("queue.notConnected") };
+      }
+      const start = current.length;
+      const added = await enqueue(uris);
+      if (!added.ok) return added;
+      return playFromPosition(start);
+    },
+    [enqueue, playFromPosition]
+  );
+
+  const appendAndPlaySelection = useCallback(
+    async (selection: Selection): Promise<QueueVerbResult> => {
+      const current = queueRef.current;
+      if (current === null) {
+        return { ok: false, message: t("queue.notConnected") };
+      }
+      const start = current.length;
+      const added = await enqueueSelectionStatus(selection, "append");
+      if (!added.ok) return added;
+      return playFromPosition(start);
+    },
+    [enqueueSelectionStatus, playFromPosition]
+  );
+
+  const appendAndPlayContainer = useCallback(
+    async (
+      sourceId: string,
+      uri: string
+    ): Promise<QueueVerbResult> => {
+      const current = queueRef.current;
+      if (current === null) {
+        return { ok: false, message: t("queue.notConnected") };
+      }
+      const start = current.length;
+      const added = await enqueueContainer(sourceId, uri, "append");
+      if (!added.ok) return added;
+      return playFromPosition(start);
+    },
+    [enqueueContainer, playFromPosition]
+  );
+
 
   const playNow = useCallback(
     async (uris: string[]): Promise<QueueVerbResult> => {
@@ -459,8 +569,11 @@ export function useAudioQueue(): AudioQueueState {
     skipToNextAvailable,
     playFromPosition,
     playNow,
+    appendAndPlay,
     enqueueSelection,
+    appendAndPlaySelection,
     enqueueContainer,
+    appendAndPlayContainer,
     refresh
   };
 }

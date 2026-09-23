@@ -8,7 +8,7 @@
 // monolith's class names wherever the piece is the same control -
 // same look, same theme obedience, no parallel styling truth.
 
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import { Fragment } from "preact";
 import {
   Heart,
@@ -20,7 +20,6 @@ import {
   Shuffle,
   SkipBack,
   SkipForward,
-  Volume2,
 } from "lucide-preact";
 
 import {
@@ -32,6 +31,7 @@ import {
 } from "../../runtime/stage-document";
 import { usePlayback } from "./usePlayback";
 import { interpolateElapsedMs } from "./now-playing-decoders";
+import { elapsedAnchorOf } from "./playback-clock";
 import { useFavourites } from "../favourites/useFavourites";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
@@ -47,17 +47,13 @@ import { ClassicalMetadataStrip } from "../classical/ClassicalMetadataStrip";
 import { ScrollingText } from "../../components/ScrollingText";
 import { HeartbeatMark } from "../../components/HeartbeatMark";
 import { PlaybackConnectionChrome } from "./playback-connection-chrome";
+import { VolumeMuteButton } from "./VolumeMuteButton";
 import { useTrackDetail } from "./use-track-detail";
 import { MetadataSection } from "./MetadataSection";
 import { LyricsBlock } from "./LyricsBlock";
 import { ProvenanceBlock, hasProvenance } from "./ProvenanceBlock";
 import { SmartCrawl } from "./SmartMetadataWidget";
 import { TrackInfoBody } from "./TrackInfoBody";
-
-interface ElapsedAnchor {
-  elapsedMs: number;
-  atMs: number;
-}
 
 function clock(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -77,8 +73,8 @@ export function StageSurface(props: StageSurfaceProps) {
   useLocale(); // re-render on language switch - strings go through t()
   const {
     connection,
-    nowPlaying, streamFormat,
-    pause, resume, next, previous, seek,
+    nowPlaying, nowPlayingObservedAtMs, streamFormat,
+    play, pause, resume, next, previous, seek,
     setVolume, setMute, setRepeat, setShuffle, setSingle,
     refreshNowPlaying,
   } = usePlayback();
@@ -112,15 +108,12 @@ export function StageSurface(props: StageSurfaceProps) {
   const singleOn = nowPlaying?.single ?? false;
 
   // Interpolated playhead between the warden's sparse now_playing
-  // transitions - same anchor-and-tick approach as the monolith.
-  const anchorKeyRef = useRef("");
-  const anchorRef = useRef<ElapsedAnchor | null>(null);
+  // transitions. The anchor is the sample and the moment usePlayback
+  // observed it - the one stamp the hero bar reads too, so both clocks
+  // re-anchor together, on every sample, including the one read a
+  // fresh start schedules. No anchor time is captured here.
+  const anchor = elapsedAnchorOf(nowPlaying, nowPlayingObservedAtMs);
   const [, setTick] = useState(0);
-  const anchorKey = `${transportState ?? "none"}:${elapsedMs ?? "null"}`;
-  if (anchorKeyRef.current !== anchorKey) {
-    anchorKeyRef.current = anchorKey;
-    anchorRef.current = elapsedMs !== null ? { elapsedMs, atMs: Date.now() } : null;
-  }
   useEffect(() => {
     if (transportState !== "playing") return;
     const id = window.setInterval(() => setTick((t) => (t + 1) % 1e6), 250);
@@ -132,14 +125,9 @@ export function StageSurface(props: StageSurfaceProps) {
   // transition can no longer show nonsense like 108:02 against a 5:21
   // track.
   const displayElapsed =
-    anchorRef.current === null
+    anchor === null
       ? 0
-      : interpolateElapsedMs(
-          anchorRef.current,
-          Date.now(),
-          isPlaying,
-          durationMs
-        );
+      : interpolateElapsedMs(anchor, Date.now(), isPlaying, durationMs);
   const progressPercent =
     durationMs !== null && durationMs > 0
       ? Math.min(100, (displayElapsed / durationMs) * 100)
@@ -155,7 +143,7 @@ export function StageSurface(props: StageSurfaceProps) {
     durationMs > 0 &&
     displayElapsed >= durationMs;
   const pegKey = isPegged
-    ? `${anchorRef.current?.elapsedMs ?? "x"}-${durationMs}`
+    ? `${anchor?.elapsedMs ?? "x"}-${durationMs}`
     : "";
   useEffect(() => {
     if (pegKey === "") return undefined;
@@ -332,7 +320,14 @@ export function StageSurface(props: StageSurfaceProps) {
             class={"playback-transport-main playback-transport-icon st-btn" + scaleCls(b)}
             disabled={busy}
             aria-label={isPlaying ? t("stage.pause") : t("stage.play")}
-            onClick={() => void runVerb(() => (isPlaying ? pause() : resume()))}>
+            onClick={() =>
+              void runVerb(
+                isPlaying
+                  ? () => pause()
+                  : transportState === "paused"
+                    ? () => resume()
+                    : () => play()
+              )}>
             {isPlaying ? <Pause /> : <Play />}
           </button>
         );
@@ -389,13 +384,17 @@ export function StageSurface(props: StageSurfaceProps) {
               );
             }}><Heart size={b.scale === 1 ? 16 : b.scale === 3 ? 26 : 20} fill={isFav ? "currentColor" : "none"} /></button>
         );
-      case "volume":
+      case "volume": {
+        const muted = nowPlaying?.muted === true;
         return (
           <div key={key} class={"playback-volume-row st-volume" + scaleCls(b)}>
-            <button type="button" class="playback-volume-icon" aria-label={t("stage.mute")}
-              disabled={busy} onClick={() => void runVerb(() => setMute(volume > 0))}>
-              <Volume2 size={16} />
-            </button>
+            <VolumeMuteButton
+              muted={muted}
+              busy={busy}
+              size={16}
+              ariaLabel={muted ? t("stage.unmute") : t("stage.mute")}
+              onClick={() => void runVerb(() => setMute(!muted))}
+            />
             <input class="playback-volume-slider" style={rangeFill(volume)} type="range" min={0} max={100} step={1}
               value={volume} disabled={busy} aria-label={t("stage.volume")}
               onChange={(e) => {
@@ -406,6 +405,7 @@ export function StageSurface(props: StageSurfaceProps) {
             <span class="playback-volume-value">{volume}%</span>
           </div>
         );
+      }
       case "codec": {
         const label = streamFormat?.source?.kind === "dsd"
           ? "DSD"

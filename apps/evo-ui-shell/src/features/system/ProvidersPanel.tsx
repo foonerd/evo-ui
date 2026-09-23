@@ -13,7 +13,13 @@
 // provider with no key (honest has_credential:false) shows its row with
 // the toggle inert and points at the Stored Keys panel - adding the key
 // there both stores it and brings the provider up.
+//
+// Every write awaits the hook and paints its message on a refusal
+// (household lock, scope, a write socket that could not open) - the
+// same honesty as Stored Keys. A success paints nothing of its own: the
+// hook re-lists on ok and the re-listed state is the paint.
 
+import { useState } from "preact/hooks";
 import {
   ChevronDown,
   ChevronUp,
@@ -24,6 +30,13 @@ import {
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 import { useProviders, DEFAULT_PRIORITY } from "../providers/useProviders";
+import type { ProviderActionResult } from "../providers/useProviders";
+import {
+  providerWriteFeedback,
+  providerWriteOpensHousehold
+} from "../providers/provider-write-feedback";
+import type { PrivacyMode } from "../providers/provider-decoders";
+import { useHouseholdModal } from "../household/HouseholdModalHost";
 
 /** Proper-noun display names - not i18n (brand names don't translate). */
 const PROVIDER_LABELS: Record<string, string> = {
@@ -74,6 +87,42 @@ export function ProvidersPanel() {
   useLocale();
   const { entries, privacyMode, error, busy, setEnabled, setPriority, setPrivacyMode } =
     useProviders();
+  const household = useHouseholdModal();
+
+  // The last refused write's message; cleared at the start of the next
+  // write. null while nothing has been refused.
+  const [writeError, setWriteError] = useState<string | null>(null);
+
+  const paintWrite = (r: ProviderActionResult): void => {
+    setWriteError(providerWriteFeedback(r));
+    if (providerWriteOpensHousehold(r) && household !== null) {
+      household.open();
+    }
+  };
+
+  const onSetPrivacyMode = async (mode: PrivacyMode): Promise<void> => {
+    setWriteError(null);
+    const r = await setPrivacyMode(mode);
+    paintWrite(r);
+  };
+
+  const onSetPriority = async (
+    providerId: string,
+    priority: number
+  ): Promise<void> => {
+    setWriteError(null);
+    const r = await setPriority(providerId, priority);
+    paintWrite(r);
+  };
+
+  const onSetEnabled = async (
+    providerId: string,
+    enabled: boolean
+  ): Promise<void> => {
+    setWriteError(null);
+    const r = await setEnabled(providerId, enabled);
+    paintWrite(r);
+  };
 
   const PRIVACY_MODES = ["enhanced", "anonymous_only", "offline"] as const;
 
@@ -104,7 +153,7 @@ export function ProvidersPanel() {
               }
               aria-pressed={privacyMode === m}
               disabled={busy}
-              onClick={() => void setPrivacyMode(m)}
+              onClick={() => void onSetPrivacyMode(m)}
             >
               {t(`providers.privacy.${m}` as never)}
             </button>
@@ -123,6 +172,12 @@ export function ProvidersPanel() {
       {error !== null ? (
         <p className="credentials-feedback" role="alert">
           {error}
+        </p>
+      ) : null}
+
+      {writeError !== null ? (
+        <p className="credentials-feedback" role="alert">
+          {writeError}
         </p>
       ) : null}
 
@@ -185,7 +240,7 @@ export function ProvidersPanel() {
                       aria-label={t("providers.raise")}
                       title={t("providers.raise")}
                       disabled={busy || i === 0}
-                      onClick={() => void setPriority(p.providerId, eff - 10)}
+                      onClick={() => void onSetPriority(p.providerId, eff - 10)}
                     >
                       <ChevronUp size={14} />
                     </button>
@@ -194,7 +249,7 @@ export function ProvidersPanel() {
                       aria-label={t("providers.lower")}
                       title={t("providers.lower")}
                       disabled={busy || i === entries.length - 1}
-                      onClick={() => void setPriority(p.providerId, eff + 10)}
+                      onClick={() => void onSetPriority(p.providerId, eff + 10)}
                     >
                       <ChevronDown size={14} />
                     </button>
@@ -230,7 +285,7 @@ export function ProvidersPanel() {
                           ? t("providers.needsKeyHint")
                           : undefined
                     }
-                    onClick={() => void setEnabled(p.providerId, !p.enabled)}
+                    onClick={() => void onSetEnabled(p.providerId, !p.enabled)}
                   >
                     {suppressed
                       ? t("providers.off")

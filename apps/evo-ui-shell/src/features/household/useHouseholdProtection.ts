@@ -22,7 +22,7 @@
 // during the gap is picked up without polling.
 
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
-import { storedBearer } from "../../runtime/bearer";
+import { storedBearer, onBearerChange } from "../../runtime/bearer";
 import {
   frameworkWsUrl,
   tryUseFrameworkTransport
@@ -36,6 +36,7 @@ import {
   decodeHouseholdHappening,
   applyHappening,
   buildSetBody,
+  householdSetAdmission,
   householdWriteSocket,
   HOUSEHOLD_GET_OP,
   HOUSEHOLD_SET_OP,
@@ -44,7 +45,16 @@ import {
 } from "./household-protection";
 import type { WireOpResult } from "../../sdk/types";
 
-export type HouseholdSetResult = { ok: true } | { ok: false; message: string };
+export type HouseholdSetResult =
+  | { ok: true }
+  | {
+      ok: false;
+      message: string;
+      /** Refused locally: this session holds no bearer, so the set was
+       *  not dispatched. The surface sends the operator to the existing
+       *  pair door. */
+      pairRequired?: true;
+    };
 
 /** Set/unlock on the sitting's caller. Get stays on the shared
  *  LAN-trust socket (it never needs a sitting). */
@@ -77,6 +87,13 @@ export interface HouseholdProtection {
    *  snapshot?.chosen === false, so it must stay null (not a fabricated
    *  default) while the read is in flight. */
   snapshot: HouseholdSnapshot | null;
+  /** The last household get answered with an error and no snapshot has
+   *  landed since: the surfaces paint that, with a retry, instead of an
+   *  in-flight Loading. null while the get is in flight or once one has
+   *  landed. Never a fabricated snapshot in its place. */
+  seedError: string | null;
+  /** Re-run the household get (the retry on a failed seed). */
+  reseed: () => void;
   busy: boolean;
   error: string | null;
   /** Apply a level (+ lend + optional protected_groups). A widening set the
@@ -85,18 +102,33 @@ export interface HouseholdProtection {
   /** Unlock: lend:false with no level, so the Framework restores prior_level.
    *  There is no second unlock op. */
   unlock: () => Promise<HouseholdSetResult>;
+  /** Drop a pair-first refusal once the operator has paired. Clears
+   *  ONLY that error (a refusal from the player stays until the next
+   *  write answers it); never saves, never dispatches. Also driven by
+   *  the bearer bus, so a pair completed on another surface clears it. */
+  clearPairFirst: () => void;
 }
 
 export function useHouseholdProtection(): HouseholdProtection {
   const transport = tryUseFrameworkTransport();
   const [snapshot, setSnapshotState] = useState<HouseholdSnapshot | null>(null);
+  const [seedError, setSeedError] = useState<string | null>(null);
+  // Bumped by reseed(): re-runs the seed read without touching the shared
+  // subscription (a retry is one more get, not a new attach).
+  const [seedNonce, setSeedNonce] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Which kind of refusal `error` currently carries, so a pair can clear
+  // the one it cures and nothing else.
+  const lastRefusalRef = useRef<"pair-first" | null>(null);
 
   // Mirror the snapshot into a ref so the happening folder (which reuses the
   // catalog) and the reconnect re-seed can read the current value without
   // re-subscribing.
   const snapRef = useRef<HouseholdSnapshot | null>(null);
+  // The current seed closure, so a retry re-runs the same get on the same
+  // socket without re-attaching the subscription.
+  const seedRef = useRef<(() => Promise<void>) | null>(null);
   const setSnapshot = useCallback((next: HouseholdSnapshot | null) => {
     snapRef.current = next;
     setSnapshotState(next);
@@ -106,11 +138,20 @@ export function useHouseholdProtection(): HouseholdProtection {
     if (transport === null) return;
     let cancelled = false;
 
+    // A failed get is recorded, never swallowed: the gate paints it with
+    // a retry instead of an in-flight Loading. A later landed get (retry
+    // or reconnect re-seed) clears it. No snapshot is ever fabricated.
     const seed = async (): Promise<void> => {
       const r = await transport.dispatch(HOUSEHOLD_GET_OP, {});
-      if (cancelled || r.error !== undefined) return;
+      if (cancelled) return;
+      if (r.error !== undefined) {
+        setSeedError(r.error.message ?? r.error.code ?? t("household.loadFailed"));
+        return;
+      }
+      setSeedError(null);
       setSnapshot(decodeHouseholdSnapshot(r.value));
     };
+    seedRef.current = seed;
 
     const fold = (raw: unknown): void => {
       if (cancelled) return;
@@ -144,16 +185,40 @@ export function useHouseholdProtection(): HouseholdProtection {
 
     return () => {
       cancelled = true;
+      seedRef.current = null;
       offConn();
       attach.stop();
     };
   }, [transport, setSnapshot]);
+
+  // Retry: one more get. The failed paint stays until the get answers
+  // (no flash back to Loading with nothing new to show), then the seed
+  // either clears the error with a snapshot or records the new failure.
+  useEffect(() => {
+    if (seedNonce === 0) return;
+    const seed = seedRef.current;
+    if (seed !== null) void seed();
+  }, [seedNonce]);
+
+  const reseed = useCallback(() => {
+    setSeedNonce((n) => n + 1);
+  }, []);
 
   const set = useCallback(
     async (input: HouseholdSetInput): Promise<HouseholdSetResult> => {
       if (transport === null) {
         return { ok: false, message: t("household.notConnected") };
       }
+      // No stored bearer, no set: refused here, nothing dispatched. The
+      // framework would admit a narrowing set from LAN-trust, and that is
+      // how an unpaired browser could lock a player with no password.
+      if (householdSetAdmission(storedBearer() !== undefined) === "pair-first") {
+        const message = t("household.pairFirst");
+        lastRefusalRef.current = "pair-first";
+        setError(message);
+        return { ok: false, message, pairRequired: true };
+      }
+      lastRefusalRef.current = null;
       setBusy(true);
       setError(null);
       try {
@@ -194,12 +259,32 @@ export function useHouseholdProtection(): HouseholdProtection {
     [set]
   );
 
+  const clearPairFirst = useCallback(() => {
+    if (lastRefusalRef.current !== "pair-first") return;
+    lastRefusalRef.current = null;
+    setError(null);
+  }, []);
+
+  // A pair completed anywhere on the page (the modal's door, the Security
+  // tile) stores the bearer and announces it: the pair-first line has
+  // nothing left to say. Nothing is saved or dispatched here.
+  useEffect(
+    () =>
+      onBearerChange(() => {
+        if (storedBearer() !== undefined) clearPairFirst();
+      }),
+    [clearPairFirst]
+  );
+
   return {
     ready: transport !== null,
     snapshot,
+    seedError,
+    reseed,
     busy,
     error,
     set,
-    unlock
+    unlock,
+    clearPairFirst
   };
 }

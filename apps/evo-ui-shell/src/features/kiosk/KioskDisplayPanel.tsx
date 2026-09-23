@@ -18,7 +18,7 @@
 // The advanced touch controls batch all three fields per the brief; the
 // wizard is the primary touch-calibration UX.
 
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import type { JSX } from "preact";
 import { ChevronDown, ChevronRight } from "lucide-preact";
 import { t } from "../../runtime/i18n";
@@ -28,7 +28,7 @@ import { rangeFill } from "../../runtime/range-fill";
 import { TouchCalibrationWizard } from "./TouchCalibrationWizard";
 import { kioskMode, type Rotation } from "./kiosk-bridge";
 import { useKioskRemote, type KioskRemoteResult } from "./kiosk-remote";
-import { classifyKioskWrite } from "./osk-state";
+import { brightnessAfterSettle, classifyKioskWrite } from "./osk-state";
 
 const ROTATIONS: ReadonlyArray<Rotation> = ["0", "90", "180", "270"];
 
@@ -127,6 +127,14 @@ export function KioskDisplayPanel(): JSX.Element {
   const [brightness, setBrightness] = useState(() =>
     clampBrightness(Number(lsGet("evo.kiosk.brightness") ?? "100"))
   );
+  // The brightness the PLAYER holds: seeded from get_display_state, moved
+  // only by a write the player accepted. A refused write puts the echo
+  // back to this. Never the drag echo.
+  const heldBrightness = useRef(brightness);
+  // Only the latest brightness write settles the slider: a drag fires a
+  // burst of writes, and an older reply must not repaint over a newer
+  // echo.
+  const brightnessSeq = useRef(0);
   const [sleepEnabled, setSleepEnabled] = useState(
     () => lsGet("evo.kiosk.sleepEnabled") !== "0"
   );
@@ -183,6 +191,7 @@ export function KioskDisplayPanel(): JSX.Element {
       setVflip(s.vflip);
       lsSet("evo.kiosk.vflip", s.vflip ? "1" : "0");
       const b = clampBrightness(s.brightnessPercent);
+      heldBrightness.current = b;
       setBrightness(b);
       lsSet("evo.kiosk.brightness", String(b));
       const sleepOn = s.sleepTimeoutSeconds !== 0;
@@ -216,13 +225,22 @@ export function KioskDisplayPanel(): JSX.Element {
   }, []);
 
   // Brightness is a drag slider, not a tick: keep the live echo so the thumb
-  // tracks the finger. A household lock is classified, not painted as 403
-  // (the device value re-seeds from get on remount).
+  // tracks the finger. The write settles like every other control - a
+  // household lock is classified, not painted as 403 - and a write the
+  // player did not take puts the echo (state + cache) back to the value
+  // the player holds. Only the latest write of a drag settles the slider.
   const applyBrightness = (p: number): void => {
     const c = clampBrightness(p);
     setBrightness(c);
-    lsSet("evo.kiosk.brightness", String(c));
-    void remote.setBrightness(c).then(settle);
+    const seq = (brightnessSeq.current += 1);
+    void remote.setBrightness(c).then((res) => {
+      if (seq !== brightnessSeq.current) return;
+      const verdict = settle(res);
+      const next = brightnessAfterSettle(verdict, c, heldBrightness.current);
+      heldBrightness.current = next.held;
+      setBrightness(next.show);
+      lsSet("evo.kiosk.brightness", String(next.show));
+    });
   };
 
   const applySleep = (enabled: boolean, seconds: number): void => {

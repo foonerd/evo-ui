@@ -45,12 +45,24 @@
 // set_enabled/brightness/sleep have no on-glass WebKit handler; they always
 // go over the plugin verb from both glass and remote (the framework
 // transport is present in both).
+//
+// Sockets: reads (get_display_state) ride the shared page-lifetime
+// LAN-trust socket. WRITES ride a private socket that presents the
+// stored kiosk / pair bearer when one is stored (read at every
+// handshake, rotated by the bearer bus, closed on unmount); with no
+// bearer they stay on the shared socket. The shared socket is never
+// given a bearer.
 
-import { useCallback } from "preact/hooks";
-import { tryUseFrameworkTransport } from "../../runtime/framework-transport";
+import { useCallback, useEffect, useRef } from "preact/hooks";
+import {
+  frameworkWsUrl,
+  tryUseFrameworkTransport
+} from "../../runtime/framework-transport";
+import { WsTransport } from "../../runtime/ws-transport";
 import { pluginRequest } from "../../runtime/plugin-request-codec";
+import { storedBearer, onBearerChange } from "../../runtime/bearer";
 import type { CalibrationSample, Rotation } from "./kiosk-bridge";
-import { readOskEnabled, readCursorVisible } from "./osk-state";
+import { kioskWriteSocket, readOskEnabled, readCursorVisible } from "./osk-state";
 
 const KIOSK_SHELF = "system.kiosk";
 
@@ -103,13 +115,15 @@ export interface KioskRemote {
   setTouchCalibration: (
     rotation: Rotation,
     hflip: boolean,
-    vflip: boolean
+    vflip: boolean,
+    opts?: { signal?: AbortSignal }
   ) => Promise<KioskRemoteResult>;
   /** The wizard's write. Four (target, actual) taps in, the derived
    *  triple out, already persisted by the player. Refused like every
    *  other write on this shelf when the household policy protects it. */
   deriveTouchCalibrationFromCorners: (
-    samples: ReadonlyArray<CalibrationSample>
+    samples: ReadonlyArray<CalibrationSample>,
+    opts?: { signal?: AbortSignal }
   ) => Promise<KioskRemoteResult>;
   launchCalibration: () => Promise<KioskRemoteResult>;
   setEnabled: (enabled: boolean) => Promise<KioskRemoteResult>;
@@ -127,15 +141,56 @@ export interface KioskRemote {
 export function useKioskRemote(): KioskRemote {
   const transport = tryUseFrameworkTransport();
 
+  // The write socket for a session with a stored bearer. Opened lazily on
+  // the first bearer write, reads the bearer at every handshake, and is
+  // re-handshaken by the bearer bus (a pair or a purge) so it never keeps
+  // an identity the session has left. Closed on unmount.
+  const writeTxRef = useRef<WsTransport | null>(null);
+  useEffect(() => {
+    const off = onBearerChange(() => {
+      const tx = writeTxRef.current;
+      if (tx !== null) tx.rotateBearer();
+    });
+    return () => {
+      off();
+      const tx = writeTxRef.current;
+      writeTxRef.current = null;
+      if (tx !== null) void tx.close();
+    };
+  }, []);
+  const writeTransport = useCallback((): WsTransport | null => {
+    if (kioskWriteSocket(storedBearer() !== undefined) === "shared") {
+      return transport;
+    }
+    let tx = writeTxRef.current;
+    if (tx === null && typeof WebSocket !== "undefined") {
+      tx = new WsTransport({ url: frameworkWsUrl(), bearerSource: storedBearer });
+      writeTxRef.current = tx;
+    }
+    return tx ?? transport;
+  }, [transport]);
+
   const dispatch = useCallback(
     async (
       verb: string,
-      payload: Record<string, unknown>
+      payload: Record<string, unknown>,
+      opts?: { signal?: AbortSignal }
     ): Promise<KioskRemoteResult> => {
-      if (transport === null) {
+      const tx = writeTransport();
+      if (tx === null) {
         return { ok: false, message: "not connected" };
       }
-      const r = await pluginRequest(transport, KIOSK_SHELF, verb, payload);
+      let r: Awaited<ReturnType<typeof pluginRequest>>;
+      try {
+        r = await pluginRequest(tx, KIOSK_SHELF, verb, payload, opts);
+      } catch (err) {
+        // The private write socket could not open (bearer refused at the
+        // upgrade, device down): an honest refusal, never a silent no-op.
+        return {
+          ok: false,
+          message: err instanceof Error ? err.message : String(err)
+        };
+      }
       if (r.error !== undefined) {
         return {
           ok: false,
@@ -164,9 +219,10 @@ export function useKioskRemote(): KioskRemote {
             : undefined
       };
     },
-    [transport]
+    [writeTransport]
   );
 
+  // READ: always the shared LAN-trust socket, bearer or not.
   const getDisplayState =
     useCallback(async (): Promise<KioskDisplayState | null> => {
       if (transport === null) return null;
@@ -200,17 +256,21 @@ export function useKioskRemote(): KioskRemote {
     getDisplayState,
     setDisplayRotation: (rotation) =>
       dispatch("set_display_rotation", { rotation }),
-    setTouchCalibration: (rotation, hflip, vflip) =>
-      dispatch("set_touch_calibration", { rotation, hflip, vflip }),
-    deriveTouchCalibrationFromCorners: (samples) =>
-      dispatch("derive_touch_calibration_from_corners", {
-        samples: samples.map((s) => ({
-          target_x: s.target_x,
-          target_y: s.target_y,
-          actual_x: s.actual_x,
-          actual_y: s.actual_y
-        }))
-      }),
+    setTouchCalibration: (rotation, hflip, vflip, opts) =>
+      dispatch("set_touch_calibration", { rotation, hflip, vflip }, opts),
+    deriveTouchCalibrationFromCorners: (samples, opts) =>
+      dispatch(
+        "derive_touch_calibration_from_corners",
+        {
+          samples: samples.map((s) => ({
+            target_x: s.target_x,
+            target_y: s.target_y,
+            actual_x: s.actual_x,
+            actual_y: s.actual_y
+          }))
+        },
+        opts
+      ),
     launchCalibration: () => dispatch("launch_touch_calibration", {}),
     setEnabled: (enabled) => dispatch("set_enabled", { enabled }),
     setBrightness: (percent) => dispatch("set_brightness", { percent }),

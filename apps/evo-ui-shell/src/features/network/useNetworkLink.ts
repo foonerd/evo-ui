@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { WsTransport } from "../../runtime/ws-transport";
 import { frameworkWsUrl, tryUseFrameworkTransport } from "../../runtime/framework-transport";
-import { storedBearer } from "../../runtime/bearer";
+import { storedBearer, onBearerChange } from "../../runtime/bearer";
+import { notifyFlightChange } from "../../runtime/flight-bus";
+import { probeStaleBearer } from "../../runtime/stale-bearer-probe";
 import { isPairRequired, isHouseholdLocked } from "../../runtime/authz-classify";
 import { nextAuthNeeded } from "./network-auth-state";
 import { pluginRequest } from "../../runtime/plugin-request-codec";
@@ -59,7 +61,9 @@ export function useNetworkLink() {
   if (transportRef.current === null && typeof WebSocket !== "undefined") {
     transportRef.current = new WsTransport({
       url: frameworkWsUrl(),
-      bearerToken: storedBearer()
+      // Read at every handshake: a pair, a purge, or a kiosk remint
+      // after mount is what the next upgrade carries.
+      bearerSource: storedBearer
     });
   }
   const transport = transportRef.current;
@@ -119,6 +123,9 @@ export function useNetworkLink() {
     setError(null);
     setSocketGen((g) => g + 1);
   }, []);
+  // The one bearer bus: a pair or a purge anywhere on the page rebuilds
+  // the mutation socket with the current bearer, no reload.
+  useEffect(() => onBearerChange(reauth), [reauth]);
 
   const request = useCallback(
     async (
@@ -139,12 +146,50 @@ export function useNetworkLink() {
       //                       funnels it and retries with the token);
       //   household lock / scope miss / anything else -> honest, no Pair.
       // This retires the E3-lite "no bearer -> raise Pair" pre-flight.
-      const result = await pluginRequest(
-        transport,
-        SHELF,
-        requestType,
-        payload
-      );
+      //
+      // The mutation socket presents the stored bearer. If its upgrade is
+      // refused the dispatch REJECTS (close 1006 - a dead token and a dead
+      // device look the same). Run the stale-bearer policy once: an
+      // anonymous read that lands proves the device up, so the token is
+      // dead -> purge it (the bearer bus rebuilds this socket anonymously)
+      // and retry the write once on LAN-trust. A failed anonymous connect
+      // keeps the token and returns the honest error.
+      let result: Awaited<ReturnType<typeof pluginRequest>>;
+      try {
+        result = await pluginRequest(transport, SHELF, requestType, payload);
+      } catch (err) {
+        const hadBearer = transport.handshakeBearer() !== undefined;
+        if (!hadBearer) {
+          return {
+            ok: false,
+            message: err instanceof Error ? err.message : String(err)
+          };
+        }
+        const outcome = await probeStaleBearer({
+          url: frameworkWsUrl(),
+          read: async (anon) => {
+            const r = await pluginRequest(anon, SHELF, "network.nm.status", {});
+            return r.error === undefined;
+          },
+          isCancelled: () => false
+        });
+        if (outcome !== "purge") {
+          return {
+            ok: false,
+            message: err instanceof Error ? err.message : String(err)
+          };
+        }
+        // Purged: the transport reads the (now absent) bearer at its next
+        // handshake, so this retry rides LAN-trust.
+        try {
+          result = await pluginRequest(transport, SHELF, requestType, payload);
+        } catch (again) {
+          return {
+            ok: false,
+            message: again instanceof Error ? again.message : String(again)
+          };
+        }
+      }
       if (result.error !== undefined) {
         const isAuth = isPairRequired(result.error);
         const locked = isHouseholdLocked(result.error);
@@ -323,6 +368,11 @@ export function useNetworkLink() {
           return false;
         }
         setIntent(next);
+        // Every intent.set carries radio_policy.flight_mode (the join
+        // always writes it false): the player may have changed Flight,
+        // so the power cluster's paint re-reads on the one in-page
+        // signal. This hook re-reads itself just below.
+        notifyFlightChange();
         await refresh();
         return true;
       } finally {
@@ -343,6 +393,10 @@ export function useNetworkLink() {
           return;
         }
         setFlightMode(enabled);
+        // One in-page signal: the power cluster's Flight paint re-reads
+        // the player. This hook follows a set made elsewhere on its own
+        // quiet poll - no second refresh path.
+        notifyFlightChange();
       } finally {
         setBusy(false);
       }

@@ -18,6 +18,7 @@ import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 import { useHouseholdModal } from "./HouseholdModalHost";
 import { surfaceEntryLocked } from "./household-protection";
+import { householdGatePhase } from "./household-gate-phase";
 import { useStepUpSitting } from "./useStepUpSitting";
 
 export function HouseholdSurfaceGate({
@@ -34,10 +35,36 @@ export function HouseholdSurfaceGate({
   if (ctx === null) {
     return <>{children}</>;
   }
-  if (ctx.household.ready && ctx.household.snapshot === null) {
+  // In flight, failed, or seeded - decided before the policy is read. A
+  // failed get is an honest error with a retry, not Loading forever; and
+  // never the children, which would open a protested group with no policy.
+  const phase = householdGatePhase({
+    ready: ctx.household.ready,
+    snapshotPresent: ctx.household.snapshot !== null,
+    seedError: ctx.household.seedError
+  });
+  if (phase === "in-flight") {
     return (
       <div className="household-gate" role="status">
         {t("household.loading")}
+      </div>
+    );
+  }
+  if (phase === "failed") {
+    return (
+      <div className="household-gate" role="alert">
+        <div className="household-gate-card">
+          <p className="household-gate-body">{t("household.loadFailed")}</p>
+          <div className="household-gate-doors">
+            <button
+              type="button"
+              className="settings-link-button"
+              onClick={ctx.household.reseed}
+            >
+              {t("household.loadRetry")}
+            </button>
+          </div>
+        </div>
       </div>
     );
   }

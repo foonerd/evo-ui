@@ -228,7 +228,7 @@ test("the wizard imports no write helper from the WebKit bridge", () => {
 
 test("the wizard's reset goes over the gated verb", () => {
   assert.ok(
-    /remote\.setTouchCalibration\("0",\s*false,\s*false\)/.test(wizard),
+    /remote\.setTouchCalibration\("0",\s*false,\s*false/.test(wizard),
     "reset-to-identity must dispatch set_touch_calibration"
   );
   assert.ok(
@@ -262,6 +262,21 @@ test("the wizard classifies with the one classifier and opens the one door", () 
   assert.ok(
     !/usePair|from\s*"[^"]*\bpair\b[^"]*"/i.test(codeOf(wizard)),
     "the wizard must not reach for Pair"
+  );
+});
+
+test("the wizard's reset and derive settle on a deadline", () => {
+  assert.ok(
+    /settleKioskCalWrite\(/.test(wizard),
+    "wizard writes must race the work against a deadline"
+  );
+  assert.ok(
+    /KIOSK_CAL_WRITE_DEADLINE_MS/.test(wizard),
+    "the deadline is the shared constant, not a one-off timer"
+  );
+  assert.ok(
+    /signal:\s*ac\.signal/.test(wizard),
+    "the transport must receive the abort so a parked request unparks"
   );
 });
 

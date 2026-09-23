@@ -15,8 +15,13 @@
 import { ExternalLink } from "lucide-preact";
 import { useLocale } from "../../runtime/use-locale";
 import { t } from "../../runtime/i18n";
-import { attributionMode } from "../playback/attribution-mode";
+import { attributionMode, type AttributionMode } from "../playback/attribution-mode";
 import { QrCode } from "../playback/QrCode";
+import {
+  FRAMEWORK_NAME,
+  FRAMEWORK_SITE,
+  PUBLIC_REPOSITORIES
+} from "./framework-credits";
 
 interface Credit {
   provider: string;
@@ -41,11 +46,65 @@ const CREDITS: ReadonlyArray<Credit> = [
   { provider: "fanart.tv", provides: "Artist artwork", license: "fanart.tv terms", url: "https://fanart.tv", keyed: true }
 ];
 
+// Where the framework lives: the organisation, the concept site, and one
+// row per public repository. Walks down the page after the version lines
+// and before the provider licences.
+function FrameworkCredits({ mode }: { mode: AttributionMode }) {
+  return (
+    <>
+      <h4 className="credits-title">{t("settings.about.framework.title")}</h4>
+      <p className="feature-description">{t("settings.about.framework.body")}</p>
+      <ul className="credits-list">
+        <li className="credit-row">
+          {mode === "qr" ? <QrCode url={FRAMEWORK_SITE} size={78} /> : null}
+          <div className="credit-col">
+            <div className="credit-head">
+              <span className="credit-provider">{FRAMEWORK_NAME}</span>
+            </div>
+            {mode === "link" ? (
+              <a className="contextual-source-link credit-url" href={FRAMEWORK_SITE} target="_blank" rel="noreferrer noopener">
+                <ExternalLink size={12} />
+                {FRAMEWORK_SITE}
+              </a>
+            ) : (
+              <span className="credit-url">{FRAMEWORK_SITE}</span>
+            )}
+          </div>
+        </li>
+      </ul>
+      <h4 className="credits-title">{t("settings.about.repos.title")}</h4>
+      <p className="feature-description">{t("settings.about.repos.body")}</p>
+      <ul className="credits-list">
+        {PUBLIC_REPOSITORIES.map((r) => (
+          <li key={r.name} className="credit-row">
+            {mode === "qr" ? <QrCode url={r.url} size={78} /> : null}
+            <div className="credit-col">
+              <div className="credit-head">
+                <span className="credit-provider">{r.name}</span>
+              </div>
+              <span className="credit-provides">{r.provides}</span>
+              {mode === "link" ? (
+                <a className="contextual-source-link credit-url" href={r.url} target="_blank" rel="noreferrer noopener">
+                  <ExternalLink size={12} />
+                  {r.url}
+                </a>
+              ) : (
+                <span className="credit-url">{r.url}</span>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
 export function CreditsPanel() {
   useLocale();
   const mode = attributionMode();
   return (
     <div className="credits-panel">
+      <FrameworkCredits mode={mode} />
       <h4 className="credits-title">{t("settings.about.credits.title")}</h4>
       <p className="feature-description">{t("settings.about.credits.intro")}</p>
       <ul className="credits-list">

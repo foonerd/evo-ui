@@ -14,6 +14,7 @@ import {
   type StepUpBridge
 } from "../../src/runtime/step-up-dispatch.ts";
 import { isElevationRequired } from "../../src/runtime/step-up-elevation.ts";
+import { createStepUpAcquireLane } from "../../src/features/pairing/step-up-acquire-lane.ts";
 
 // Bare permission_denied: NOT step-up-curable (the loop cause).
 const PERM = { code: "permission_denied", message: "requires network_admin" };
@@ -197,13 +198,117 @@ test("cached token rides the first send so a household lock admits without eleva
   assert.equal(b.acquired, 0);
 });
 
-test("stale token on a household lock is cleared and does not raise the card", async () => {
+test("household-locked on a cached token raises acquire once", async () => {
+  // The cached sitting rode the first send and the gate still refused:
+  // it is spent. Clear it, raise the ONE card once, retry with the fresh
+  // sitting - never a dead end with no card and no sitting.
+  const b = bridge("fresh", "stale");
+  const seen: Array<string | undefined> = [];
+  const send = async (_op: string, payload: Record<string, unknown>) => {
+    seen.push(payload["step_up_token"] as string | undefined);
+    return payload["step_up_token"] === "fresh"
+      ? { value: { ok: 1 } }
+      : { error: LOCKED };
+  };
+  const r = await dispatchWithStepUp(send, "request", {}, undefined, b);
+  assert.deepEqual(r, { value: { ok: 1 } });
+  assert.deepEqual(seen, ["stale", "fresh"], "one send with the dead sitting, one with the fresh one");
+  assert.equal(b.acquired, 1, "exactly one card");
+  assert.equal(b.token, "fresh", "the fresh sitting is cached for the next send");
+});
+
+test("household-locked on a cached token: cancel returns the lock", async () => {
   const b = bridge(null, "stale");
-  const send = async () => ({ error: LOCKED });
+  let calls = 0;
+  const send = async () => {
+    calls += 1;
+    return { error: LOCKED };
+  };
   const r = await dispatchWithStepUp(send, "request", {}, undefined, b);
   assert.equal((r.error as { subclass?: string }).subclass, "household_policy_locked");
-  assert.equal(b.token, null);
-  assert.equal(b.acquired, 0);
+  assert.equal(b.acquired, 1, "the card was raised once");
+  assert.equal(b.token, null, "the dead sitting stays cleared on cancel");
+  assert.equal(calls, 1, "no retry without a sitting");
+});
+
+test("a second household lock after the fresh sitting leaves token null", async () => {
+  // The card was offered; the gate refused the fresh sitting too. A
+  // sitting the household gate would not spend is not a live override:
+  // it is cleared so no gate opens on it, the lock is surfaced, and
+  // nothing loops or stacks.
+  const b = bridge("fresh", "stale");
+  let calls = 0;
+  const send = async () => {
+    calls += 1;
+    return { error: LOCKED };
+  };
+  const r = await dispatchWithStepUp(send, "request", {}, undefined, b);
+  assert.equal((r.error as { subclass?: string }).subclass, "household_policy_locked");
+  assert.equal(b.acquired, 1, "acquire once, never again in the same dispatch");
+  assert.equal(calls, 2, "dead sitting, then fresh sitting, then stop");
+  assert.equal(b.token, null, "the refused fresh sitting is cleared - the gate cannot open on it");
+});
+
+test("a fresh sitting the gate admits stays cached", async () => {
+  const b = bridge("fresh", "stale");
+  const send = async (_op: string, payload: Record<string, unknown>) =>
+    payload["step_up_token"] === "fresh" ? { value: { ok: 1 } } : { error: LOCKED };
+  const r = await dispatchWithStepUp(send, "request", {}, undefined, b);
+  assert.deepEqual(r, { value: { ok: 1 } });
+  assert.equal(b.token, "fresh");
+});
+
+test("acquiring still admits only one card: a lock while a card is up is surfaced, not stacked", async () => {
+  // A dispatch whose card is up holds the guard; a second dispatch that
+  // hits the household lock with a cached sitting meanwhile surfaces the
+  // lock and raises nothing.
+  let release: (token: string | null) => void = () => undefined;
+  const first = bridge(null, null);
+  first.acquire = () =>
+    new Promise<string | null>((resolve) => {
+      first.acquired += 1;
+      release = resolve;
+    });
+  const stepUpThenOk = async (_op: string, payload: Record<string, unknown>) =>
+    "step_up_token" in payload ? { value: { ok: 1 } } : { error: STEPUP };
+  const pending = dispatchWithStepUp(stepUpThenOk, NATIVE_OP, {}, undefined, first);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(first.acquired, 1, "the first card is up");
+
+  const second = bridge("never", "stale");
+  const lockSend = async () => ({ error: LOCKED });
+  const r = await dispatchWithStepUp(lockSend, "request", {}, undefined, second);
+  assert.equal((r.error as { subclass?: string }).subclass, "household_policy_locked");
+  assert.equal(second.acquired, 0, "no second card while the first is up");
+  assert.equal(second.token, null, "the dead sitting is still cleared");
+
+  release("t1");
+  const done = await pending;
+  assert.deepEqual(done, { value: { ok: 1 } });
+});
+
+test("NON_ELEVATABLE_OPS unchanged: the seven ops never carry a sitting and never raise the card", async () => {
+  for (const op of [
+    "pair_begin",
+    "pair_authenticate",
+    "pair_complete",
+    "step_up_auth_verify",
+    "negotiate",
+    "release_user_interaction_responder",
+    "list_user_interactions"
+  ]) {
+    const b = bridge("never", "cached");
+    const seen: Array<string | undefined> = [];
+    const send = async (_op: string, payload: Record<string, unknown>) => {
+      seen.push(payload["step_up_token"] as string | undefined);
+      return { error: LOCKED };
+    };
+    const r = await dispatchWithStepUp(send, op, {}, undefined, b);
+    assert.deepEqual(seen, [undefined], `${op}: no sitting on the send`);
+    assert.equal(b.acquired, 0, `${op}: no card`);
+    assert.equal(b.token, "cached", `${op}: the sitting is untouched`);
+    assert.equal((r.error as { subclass?: string }).subclass, "household_policy_locked");
+  }
 });
 
 test("native op: cached token satisfies retry without raising the card", async () => {
@@ -309,4 +414,27 @@ test("native op: payload already carrying a token is not retried (no loop)", asy
   assert.equal((r.error as { subclass?: string }).subclass, "step_up_required");
   assert.equal(calls, 1);
   assert.equal(b.acquired, 0);
+});
+
+test("a second acquire on the same lane settles the first waiter", async () => {
+  // Household override and a dispatch can both call acquire. Replacing
+  // pending used to orphan the first promise. One lane, one card.
+  const lane = createStepUpAcquireLane();
+  const b = bridge(null, null);
+  b.acquire = () =>
+    new Promise<string | null>((resolve) => {
+      b.acquired += 1;
+      lane.enqueue(resolve);
+    });
+  const stepUpThenOk = async (_op: string, payload: Record<string, unknown>) =>
+    "step_up_token" in payload ? { value: { ok: 1 } } : { error: STEPUP };
+  const pending = dispatchWithStepUp(stepUpThenOk, NATIVE_OP, {}, undefined, b);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(b.acquired, 1, "the first card is up");
+  const override = b.acquire("household_override");
+  assert.equal(b.acquired, 2, "the override joins; it does not open a second card");
+  lane.settle("t1");
+  const done = await pending;
+  assert.deepEqual(done, { value: { ok: 1 } });
+  assert.equal(await override, "t1", "first waiter was not orphaned");
 });

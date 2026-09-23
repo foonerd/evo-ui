@@ -24,6 +24,11 @@ import type { CallOpts, SubscribeOpts, WireOpResult } from "../sdk/types";
 import { DEFAULT_OPEN_DEADLINE_MS, RECOVERY_OPEN_DEADLINE_MS } from "./deadline.ts";
 import { dispatchWithStepUp, type StepUpBridge } from "./step-up-dispatch.ts";
 import { liftErrorSubclass } from "./wire-error.ts";
+import {
+  handshakeBearer,
+  handshakeProtocols,
+  type BearerSource
+} from "./bearer-handshake.ts";
 
 // App-level operator-password bridge, installed once by StepUpHost.
 // Module-global so EVERY WsTransport instance (the shared socket and
@@ -85,7 +90,14 @@ type OutgoingFrame =
 /** Configuration for the WebSocket transport. */
 export interface WsTransportConfig {
   url?: string;
+  /** Fixed bearer snapshot. Prefer `bearerSource` for any socket that
+   *  outlives a pair / purge / kiosk remint: a snapshot is not the
+   *  handshake. */
   bearerToken?: string;
+  /** Live bearer source, read at EVERY handshake (first open and every
+   *  reconnect). `undefined` from the source = open anonymously. Wins
+   *  over `bearerToken` when both are given. */
+  bearerSource?: BearerSource;
   /** Reconnect backoff schedule in milliseconds. */
   backoffMs?: readonly number[];
   /** Hard deadline for a single WS open, in milliseconds. A stuck
@@ -155,6 +167,7 @@ function isKeepaliveEvent(event: unknown): boolean {
 export class WsTransport implements Transport {
   private readonly url: string;
   private bearerToken: string | undefined;
+  private bearerSource: BearerSource | undefined;
   private readonly backoffMs: readonly number[];
   private readonly openTimeoutMs: number;
   private readonly recoveryOpenTimeoutMs: number;
@@ -167,6 +180,11 @@ export class WsTransport implements Transport {
   private connectionListeners = new Set<
     (state: "open" | "closed") => void
   >();
+  /** Fires once per FAILED reconnect attempt (the loop that arms after
+   *  a socket that had opened drops). A bearer-scoped consumer uses it
+   *  to run the stale-bearer probe: the transport itself cannot tell a
+   *  dead token from a dead device at the upgrade (both are close 1006). */
+  private reconnectFailureListeners = new Set<(attempt: number) => void>();
   private connectPromise: Promise<WebSocket> | null = null;
   private backoffIndex = 0;
   private closing = false;
@@ -188,6 +206,7 @@ export class WsTransport implements Transport {
   public constructor(cfg: WsTransportConfig = {}) {
     this.url = cfg.url ?? defaultWsUrl();
     this.bearerToken = cfg.bearerToken;
+    this.bearerSource = cfg.bearerSource;
     this.backoffMs = cfg.backoffMs ?? DEFAULT_BACKOFF;
     this.openTimeoutMs = cfg.openTimeoutMs ?? DEFAULT_OPEN_DEADLINE_MS;
     this.recoveryOpenTimeoutMs =
@@ -213,13 +232,40 @@ export class WsTransport implements Transport {
     }
   }
 
+  /** Pin a fixed bearer (or none) and re-handshake now. Replaces any
+   *  live source: after this call the snapshot IS the handshake. */
   public setBearerToken(token: string | undefined): void {
     this.bearerToken = token;
-    // Force reconnect so the new token takes effect at the next
-    // handshake. In-flight pending requests reject on close.
+    this.bearerSource = undefined;
+    this.rotateBearer();
+  }
+
+  /** Re-handshake now with whatever the source (or snapshot) says: the
+   *  in-page bearer bus calls this after a pair or a purge so a live
+   *  socket does not keep an old identity until it happens to drop.
+   *  A socket that is not open is already on the reconnect loop, which
+   *  reads the source on its next attempt; nothing to do. In-flight
+   *  pending requests reject on close. */
+  public rotateBearer(): void {
     if (this.socket !== null && this.socket.readyState === WebSocket.OPEN) {
       this.socket.close(1000, "bearer-rotated");
     }
+  }
+
+  /** The bearer this transport would present at its next handshake. */
+  public handshakeBearer(): string | undefined {
+    return handshakeBearer(this.bearerSource, this.bearerToken);
+  }
+
+  /** Failed reconnect attempts (see the field doc). Returns the
+   *  unsubscribe. */
+  public onReconnectAttemptFailed(
+    handler: (attempt: number) => void,
+  ): () => void {
+    this.reconnectFailureListeners.add(handler);
+    return (): void => {
+      this.reconnectFailureListeners.delete(handler);
+    };
   }
 
   /** Subscribe to the framework's happenings fan-out. */
@@ -283,6 +329,7 @@ export class WsTransport implements Transport {
   public async close(): Promise<void> {
     this.closing = true;
     this.clearAllSubWatchdogs();
+    this.reconnectFailureListeners.clear();
     if (typeof window !== "undefined") {
       window.removeEventListener("pagehide", this.pageHideHandler);
     }
@@ -539,10 +586,12 @@ export class WsTransport implements Transport {
     // framework's extract path matches exactly this prefix; the
     // token itself is base64url unpadded, so the whole value is a
     // legal RFC 7230 token and the server echoes it in the 101).
-    const protocols =
-      this.bearerToken !== undefined
-        ? [`evo.bearer.${this.bearerToken}`]
-        : undefined;
+    // Read the bearer NOW, at the handshake - a live source sees a
+    // pair, a purge, or a kiosk remint that happened after this
+    // transport was built.
+    const protocols = handshakeProtocols(
+      handshakeBearer(this.bearerSource, this.bearerToken)
+    );
     const ws = new WebSocket(this.url, protocols);
     return await new Promise<WebSocket>((resolve, reject) => {
       // Hard open deadline. A stuck upgrade (proxy accepted the TCP
@@ -740,7 +789,13 @@ export class WsTransport implements Transport {
           }
         })
         .catch(() => {
-          // The device is still unreachable - keep retrying.
+          // The device is still unreachable - or the bearer this
+          // handshake presented is dead; the upgrade looks the same
+          // either way. Tell bearer-scoped consumers so they can run
+          // the stale-bearer probe, then keep retrying.
+          for (const handler of this.reconnectFailureListeners) {
+            handler(this.backoffIndex);
+          }
           this.scheduleReconnect();
         });
     }, delay);

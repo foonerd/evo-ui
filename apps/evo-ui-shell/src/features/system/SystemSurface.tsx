@@ -10,6 +10,7 @@ import { combineCapabilityStatuses } from "../../core/capability-status";
 import { formatRequestDetail } from "../../core/request-id";
 import { shouldRefreshFromAnomaly } from "../../core/anomaly-refresh";
 import { DomainHistoryView } from "../activity/DomainHistory";
+import { ShareActivityFeed } from "../activity/ShareActivityFeed";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 import { DispositionPanel } from "../activity/DispositionPanel";
@@ -184,16 +185,17 @@ export function SystemSurface({
     return {
       library: "coming",
       audio: canUseSettings ? "partial" : "coming",
-      "multi-room": "available",
+      // Multi-room is not finished: partial, not available.
+      "multi-room": "partial",
       cast: "coming",
       sources: "coming",
       "file-sharing": "available",
+      // Network follows the runtime's capability stamp: supported is
+      // available (the page passed), partial is partial, absent is coming.
       network: networkStatus === "supported" ? "available" : networkStatus === "partial" ? "partial" : "coming",
-      // Artwork sources, online providers, and API keys are live
-      // (CredentialsPanel + ProvidersPanel + ArtworkSettingsPanel, all
-      // on real framework wire ops); scrobbling + anonymisation controls
-      // are not built yet - so the group is genuinely partial, not coming.
-      metadata: "partial",
+      // Metadata is finished: artwork sources, online providers, and API
+      // keys are live on real framework wire ops.
+      metadata: "available",
       "smart-home": "coming",
       system: "partial",
       security: "available",
@@ -551,6 +553,7 @@ function GroupContent(props: GroupContentProps) {
       {props.group === "security" ? <SecurityGroup /> : null}
       {props.group === "activity" ? (
         <>
+          <ShareActivityFeed />
           <DomainHistoryView />
           <DispositionPanel />
         </>

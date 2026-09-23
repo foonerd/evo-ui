@@ -1221,6 +1221,13 @@ body {
   padding: 0;
 }
 
+/* Mute is its own flag. The default icon colour is forced
+ * muted-foreground; the muted modifier must beat that so the
+ * crossed speaker reads as the live mute state. */
+.playback-volume-icon.playback-volume-icon-muted {
+  color: var(--danger, #ff7b7b) !important;
+}
+
 /* Compact -/+ step buttons flanking the volume slider. A filled
  * disc plus a defined border so they read unmistakably as buttons
  * rather than as a stray - / + glyph; hover and press pick up the
@@ -3953,6 +3960,9 @@ select:focus-visible {
 }
 
 /* Activity surface - section headings + the presence feed. */
+.activity-shares {
+  margin: 0 0 1.1rem;
+}
 .activity-section-title {
   margin: 0.3rem 0 0;
   font-size: calc((0.8rem) * var(--type-scale, 1));
@@ -4982,14 +4992,14 @@ select:focus-visible {
    is non-blocking (no scrim, pointer-events disabled on the
    root); add the scrim class to block input. The card itself
    is always interactive so the optional Cancel button works
-   in both modes. */
+   in both modes. z-index is the dialog attention band — the
+   framework password card (prompt band) must stack above it. */
 .evo-heartbeat-panel-root {
   position: fixed;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 200;
   pointer-events: none;
 }
 
@@ -5035,6 +5045,72 @@ select:focus-visible {
   min-height: 1.2em;
   line-height: 1.3;
   font-variant-numeric: tabular-nums;
+}
+
+.library-scan-progress {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.45rem;
+  width: min(18rem, 70vw);
+}
+
+.library-scan-progress-count,
+.library-scan-progress-elapsed {
+  margin: 0;
+}
+
+.library-scan-progress-bar {
+  display: block;
+  width: 100%;
+  height: 0.55rem;
+  border: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--muted-foreground) 22%, transparent);
+}
+
+.library-scan-progress-bar::-webkit-progress-bar {
+  background: transparent;
+}
+
+.library-scan-progress-bar::-webkit-progress-value {
+  background: var(--primary);
+}
+
+.library-scan-progress-bar::-moz-progress-bar {
+  background: var(--primary);
+}
+
+.usb-removal-stages {
+  list-style: none;
+  margin: 0.7rem 0 0;
+  padding: 0;
+  text-align: left;
+}
+
+/* Three brightness tiers, no glyphs. Measured against --card on every
+   theme: current (foreground) 16-18:1; done (muted token, full opacity)
+   5.8-7.0:1; pending (muted token at 0.65) 3.1-3.2:1 - quieter than
+   done, still legible on the DSI in a bright room. Below 0.65 the
+   pending lines fall under 3:1 and vanish. */
+.usb-removal-stage {
+  padding: 0.25rem 0;
+}
+
+.usb-removal-stage-done {
+  color: var(--muted-foreground);
+}
+
+.usb-removal-stage-current {
+  color: var(--foreground);
+  opacity: 1;
+  font-weight: 600;
+}
+
+.usb-removal-stage-pending {
+  color: var(--muted-foreground);
+  opacity: 0.65;
 }
 
 .evo-heartbeat-panel-cancel {
@@ -7673,6 +7749,7 @@ button.list-aa:not([data-mode="system"]) {
 .sources-activity-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .sources-activity-line { font-size: calc((0.78rem) * var(--type-scale, 1)); color: var(--foreground); }
 .sources-activity-detail { font-size: calc((0.7rem) * var(--type-scale, 1)); color: var(--danger); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sources-activity-reason { font-size: calc((0.7rem) * var(--type-scale, 1)); color: var(--danger); }
 .sources-activity-time { font-size: calc((0.68rem) * var(--type-scale, 1)); color: var(--muted-foreground); white-space: nowrap; margin-left: auto; }
 .sources-form-row { display: flex; align-items: center; gap: 0.7rem; margin: 0.35rem 0; }
 .sources-share-picker { max-height: 11rem; overflow-y: auto; margin: 0.2rem 0 0.5rem; }

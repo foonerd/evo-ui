@@ -21,6 +21,11 @@ import {
   type PlaylistContents,
   type PlaylistIndex
 } from "./playlist-decoders";
+import {
+  addToPlaylistPayload,
+  moveInPlaylistPayload,
+  removeFromPlaylistPayload
+} from "./playlist-payloads";
 
 const PLAYLIST_SHELF = "audio.playlist";
 const PAYLOAD_VERSION = 1;
@@ -286,12 +291,14 @@ export function usePlaylists(): UsePlaylistsState {
       }),
     [dispatchVoid]
   );
+  // add / remove / move send the fields the plugin's payload structs
+  // read (name, not playlist_name; positions as a list). The encoders
+  // live in playlist-payloads.ts so the contract harness can check the
+  // exact envelope; save_selection below keeps playlist_name, which is
+  // that verb's own field.
   const addToPlaylist = useCallback(
     (playlistName: string, uris: string[]) =>
-      dispatchVoid("playlist.add_to_playlist", {
-        playlist_name: playlistName,
-        uris
-      }),
+      dispatchVoid("playlist.add_to_playlist", addToPlaylistPayload(playlistName, uris)),
     [dispatchVoid]
   );
   const saveSelection = useCallback(
@@ -351,19 +358,18 @@ export function usePlaylists(): UsePlaylistsState {
   );
   const removeFromPlaylist = useCallback(
     (playlistName: string, position: number) =>
-      dispatchVoid("playlist.remove_from_playlist", {
-        playlist_name: playlistName,
-        position
-      }),
+      dispatchVoid(
+        "playlist.remove_from_playlist",
+        removeFromPlaylistPayload(playlistName, position)
+      ),
     [dispatchVoid]
   );
   const moveInPlaylist = useCallback(
     (playlistName: string, fromPosition: number, toPosition: number) =>
-      dispatchVoid("playlist.move_in_playlist", {
-        playlist_name: playlistName,
-        from_position: fromPosition,
-        to_position: toPosition
-      }),
+      dispatchVoid(
+        "playlist.move_in_playlist",
+        moveInPlaylistPayload(playlistName, fromPosition, toPosition)
+      ),
     [dispatchVoid]
   );
 

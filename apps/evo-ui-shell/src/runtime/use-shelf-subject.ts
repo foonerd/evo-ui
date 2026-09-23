@@ -10,8 +10,9 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { MutableRef } from "preact/hooks";
 import { WsTransport } from "./ws-transport";
-import { clearBearer } from "./bearer";
+import { clearBearer, onBearerChange } from "./bearer";
 import { resolveConnectFailure, resolveProbeRead } from "./stale-bearer-policy";
+import { probeStaleBearer } from "./stale-bearer-probe";
 import { pluginRequest } from "./plugin-request-codec";
 import { connectWithRetry, MAX_CONNECT_ATTEMPTS } from "./connect-retry";
 import { verbErrorMessage } from "./verb-error";
@@ -62,8 +63,14 @@ export interface ShelfSubjectConfig<S> {
    *  bearer REPLACES the anonymous LAN-trust grants with the token's
    *  own scope set - a narrow token can do LESS than no token. Only
    *  pass one when the surface needs a scope anonymity lacks. Never
-   *  applied to the shared FrameworkTransport. */
+   *  applied to the shared FrameworkTransport. A fixed snapshot; prefer
+   *  `bearerSource`. */
   bearerToken?: string;
+  /** Live bearer source, read at every handshake of the private socket
+   *  (first open and every reconnect) and when deciding whether this
+   *  mount owns a private socket at all. A pair, a purge, or a kiosk
+   *  remint written after mount is what the next upgrade carries. */
+  bearerSource?: () => string | undefined;
   /** The shelf's read verb (e.g. queue.get_queue). Subject
    *  subscribes never snapshot - the read is NOT optional. */
   readRequestType: string;
@@ -155,6 +162,13 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
     setReauthNonce((n) => n + 1);
   }, []);
 
+  // The one bearer bus: a pair stores a token, the stale-bearer policy
+  // purges one (from this mount or any other bearer socket on the page).
+  // Either way this mount re-handshakes with the CURRENT bearer at once -
+  // a private socket after a pair, the shared LAN-trust socket after a
+  // purge - so no second reload is ever needed to get clean.
+  useEffect(() => onBearerChange(reauth), [reauth]);
+
   useEffect(() => {
     const cfg = configRef.current;
     if (!secondaryLive) {
@@ -173,7 +187,14 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
     // even though a bearer is stored, so the anon read can prove the
     // token dead vs the device down.
     const probing = forceAnonRef.current;
-    const storedBearerTok = bearerRef.current;
+    // The bearer as of THIS mount: the live source when the caller gave
+    // one, else the snapshot. Decides whether this mount owns a private
+    // bearer socket; the socket itself re-reads the source at every
+    // handshake, so a token written later is what the next upgrade
+    // carries (never a construction snapshot).
+    const readBearer = (): string | undefined =>
+      cfg.bearerSource !== undefined ? cfg.bearerSource() : bearerRef.current;
+    const storedBearerTok = readBearer();
     const hadStoredBearer =
       typeof storedBearerTok === "string" && storedBearerTok.length > 0;
     const bearer = probing ? undefined : storedBearerTok;
@@ -186,7 +207,9 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
     const transport = ownsTransport
       ? new WsTransport({
           url: frameworkUrl(),
-          bearerToken: bearer
+          // A probing / designer socket is anonymous by construction and
+          // stays so; a bearer socket reads the live bearer per handshake.
+          bearerSource: bearerScoped ? readBearer : undefined
         })
       : sharedTransport;
     transportRef.current = transport;
@@ -243,6 +266,65 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
     setConnection({ kind: "connecting" });
     const subAbort = new AbortController();
     let offHappening: (() => void) | undefined;
+    let offConn: (() => void) | undefined;
+    let offReconnectFailed: (() => void) | undefined;
+
+    const seedRead = async (): Promise<boolean> => {
+      const initial = await pluginRequest(
+        transport,
+        cfg.shelf,
+        cfg.readRequestType,
+        { v: PAYLOAD_VERSION }
+      );
+      if (cancelled) return false;
+      if (initial.error === undefined) {
+        const seeded = cfg.decodeRead(initial.value);
+        if (seeded !== null) setState(seeded);
+        return true;
+      }
+      return false;
+    };
+
+    // Reconnect on a bearer socket: the transport keeps retrying with
+    // the live bearer, but a dead token and a dead device look the same
+    // at the upgrade (close 1006). Run the SAME stale-bearer policy the
+    // first seed runs - one anonymous probe per drop episode: a landed
+    // read purges the token (the bearer bus then re-mounts this shelf on
+    // the LAN-trust socket, live); a failed anonymous connect keeps the
+    // token and the honest disconnected paint (outage, never a purge);
+    // a refused read backs out and stops probing until the socket opens.
+    let probeInFlight = false;
+    let backedOut = false;
+    const probeOnReconnectFailure = async (): Promise<void> => {
+      if (!bearerScoped || probeInFlight || backedOut || cancelled) return;
+      probeInFlight = true;
+      try {
+        const outcome = await probeStaleBearer({
+          url: frameworkUrl(),
+          read: async (anon) => {
+            const r = await pluginRequest(anon, cfg.shelf, cfg.readRequestType, {
+              v: PAYLOAD_VERSION
+            });
+            return r.error === undefined;
+          },
+          isCancelled: () => cancelled
+        });
+        if (cancelled) return;
+        if (outcome === "backout") {
+          backedOut = true;
+          setConnection({
+            kind: "error",
+            reason: cfg.messages.noResponse(MAX_CONNECT_ATTEMPTS, "read refused")
+          });
+        }
+        // "purge": clearBearer() announced it; the bus reauth re-mounts
+        // this shelf anonymously. "device-down": token kept, the
+        // disconnected paint below already says so; the transport keeps
+        // retrying and the next failed attempt probes again.
+      } finally {
+        probeInFlight = false;
+      }
+    };
 
     const seed = async (): Promise<void> => {
       try {
@@ -256,27 +338,21 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
         if (cancelled) return;
         setConnection({ kind: "connected" });
 
-        const initial = await pluginRequest(
-          transport,
-          cfg.shelf,
-          cfg.readRequestType,
-          { v: PAYLOAD_VERSION }
-        );
+        const readLanded = await seedRead();
         if (cancelled) return;
-        if (initial.error === undefined) {
-          const seeded = cfg.decodeRead(initial.value);
-          if (seeded !== null) setState(seeded);
-        }
         const probeRead = resolveProbeRead({
           probing,
-          readLanded: initial.error === undefined
+          readLanded
         });
         if (probeRead === "purge") {
           // The anonymous read landed where the bearer socket was
           // refused: the stored token is dead (device reset / revoked /
           // expired), not the device. Purge it - the surface drops to
           // its unpaired "pair to manage" state with this live read-only
-          // content, no incognito / site-data clearing.
+          // content, no incognito / site-data clearing. clearBearer()
+          // announces the purge on the bearer bus, which re-mounts this
+          // shelf on the shared LAN-trust socket; the anonymous probe
+          // socket keeps serving until that re-mount lands.
           clearBearer();
           bearerRef.current = undefined;
           forceAnonRef.current = false;
@@ -302,6 +378,28 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
         offHappening = transport.onHappening((f) =>
           handleHappening(f.happening)
         );
+        // `connected` is only ever painted for an OPEN socket. A drop
+        // paints the honest disconnected state while the transport
+        // retries; a reopen re-seeds the read (a happening missed during
+        // the gap is state, not a delta) and paints connected again.
+        offConn = transport.onConnectionChange((socketState) => {
+          if (cancelled) return;
+          if (socketState === "open") {
+            backedOut = false;
+            setConnection({ kind: "connected" });
+            void seedRead();
+          } else {
+            // Honest while the transport retries: not connected, no
+            // attempt count (the reconnect loop has no ceiling).
+            setConnection({
+              kind: "disconnected",
+              reason: cfg.messages.notConnected()
+            });
+          }
+        });
+        offReconnectFailed = transport.onReconnectAttemptFailed(() => {
+          void probeOnReconnectFailure();
+        });
         void (async (): Promise<void> => {
           const stream = transport.subscribe(
             "subscribe_happenings",
@@ -346,6 +444,8 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
       cancelled = true;
       subAbort.abort();
       if (offHappening !== undefined) offHappening();
+      if (offConn !== undefined) offConn();
+      if (offReconnectFailed !== undefined) offReconnectFailed();
       void transport.close();
       transportRef.current = null;
     };

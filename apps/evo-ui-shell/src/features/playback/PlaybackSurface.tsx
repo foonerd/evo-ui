@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { usePlayback } from "./usePlayback";
 import {
   interpolateElapsedMs,
-  type ElapsedAnchor,
   type TransportState
 } from "./now-playing-decoders";
+import { elapsedAnchorOf } from "./playback-clock";
 import {
   Heart,
   ListPlus,
@@ -16,8 +16,6 @@ import {
   Shuffle,
   SkipBack,
   SkipForward,
-  Volume2,
-  VolumeX
 } from "lucide-preact";
 import { useFavourites } from "../favourites/useFavourites";
 import { usePlaylists } from "../playlist/usePlaylists";
@@ -43,6 +41,9 @@ import { ScrollingText } from "../../components/ScrollingText";
 import type { TextOverflowMode } from "../../components/ScrollingText";
 import { HeartbeatMark } from "../../components/HeartbeatMark";
 import { PlaybackConnectionChrome } from "./playback-connection-chrome";
+import { VolumeMuteButton } from "./VolumeMuteButton";
+import { t } from "../../runtime/i18n";
+import { useLocale } from "../../runtime/use-locale";
 
 interface PlaybackSurfaceProps {
   /** Step for the Volume -/+ buttons, from the central settings. */
@@ -118,6 +119,7 @@ export function PlaybackSurface({
   const {
     connection,
     nowPlaying,
+    nowPlayingObservedAtMs,
     streamFormat,
     play,
     pause,
@@ -167,6 +169,7 @@ export function PlaybackSurface({
   const showVolumeSteps =
     !compact || plan.effectiveW >= plan.touchTargetPx * 3 + 160;
 
+  useLocale();
   const lastNonZeroVolumeRef = useRef(40);
   // Optimistic slider positions. A controlled range input bound to
   // the warden's state would snap the thumb back to the old value
@@ -201,7 +204,6 @@ export function PlaybackSurface({
   // (cache-first; costs nothing when closed or on a repeat artist).
   const artistImageUrl = useArtistImage(artZoom ? track?.artist ?? null : null);
   const volume = nowPlaying?.volume ?? 0;
-  const elapsedMs = nowPlaying?.elapsedMs ?? null;
   const durationMs = nowPlaying?.durationMs ?? null;
   const isPlaying = transportState === "playing";
   const shuffleOn = nowPlaying?.shuffle ?? false;
@@ -211,21 +213,14 @@ export function PlaybackSurface({
   // pause / stop / track change / seek / volume - never on the
   // playhead simply advancing, and a fresh page never receives the
   // standing value at all. To keep the progress bar moving between
-  // those sparse updates, anchor on each reported position and
-  // advance a local clock while playing. Re-anchor synchronously
-  // during render whenever the transport state or the reported
-  // elapsed value changes, so a paused or seeked frame shows its
-  // own position rather than drifting from a stale anchor.
-  const anchorKeyRef = useRef<string>("");
-  const elapsedAnchorRef = useRef<ElapsedAnchor | null>(null);
+  // those sparse updates, anchor on the last sample and advance a
+  // local clock while playing. The anchor is the sample and the
+  // moment usePlayback observed it - the one stamp the stage reads
+  // too, so both clocks re-anchor together, on every sample, including
+  // the one read a fresh start schedules. No anchor time is captured
+  // here and nothing is keyed on the sample's content.
+  const anchor = elapsedAnchorOf(nowPlaying, nowPlayingObservedAtMs);
   const [, setClockTick] = useState(0);
-
-  const anchorKey = `${transportState ?? "none"}:${elapsedMs ?? "null"}`;
-  if (anchorKeyRef.current !== anchorKey) {
-    anchorKeyRef.current = anchorKey;
-    elapsedAnchorRef.current =
-      elapsedMs !== null ? { elapsedMs, atMs: Date.now() } : null;
-  }
 
   // While playing, re-render four times a second so the interpolated
   // position advances on screen between warden updates.
@@ -238,14 +233,9 @@ export function PlaybackSurface({
   }, [transportState]);
 
   const displayElapsedMs =
-    elapsedAnchorRef.current === null
+    anchor === null
       ? 0
-      : interpolateElapsedMs(
-          elapsedAnchorRef.current,
-          Date.now(),
-          isPlaying,
-          durationMs
-        );
+      : interpolateElapsedMs(anchor, Date.now(), isPlaying, durationMs);
 
   const progressPercent = useMemo(() => {
     if (durationMs === null || durationMs <= 0) {
@@ -272,7 +262,7 @@ export function PlaybackSurface({
     durationMs > 0 &&
     displayElapsedMs >= durationMs;
   const pegKey = isPegged
-    ? `${elapsedAnchorRef.current?.elapsedMs ?? "x"}-${durationMs ?? "x"}`
+    ? `${anchor?.elapsedMs ?? "x"}-${durationMs ?? "x"}`
     : "";
   useEffect(() => {
     if (pegKey === "") return;
@@ -649,21 +639,21 @@ export function PlaybackSurface({
       </div>
 
       <div className="playback-volume-row">
-        <button
-          type="button"
-          className="playback-volume-icon"
-          disabled={busy}
+        <VolumeMuteButton
+          muted={nowPlaying?.muted === true}
+          busy={busy}
+          size={iconStd}
+          ariaLabel={
+            nowPlaying?.muted === true ? t("stage.unmute") : t("stage.mute")
+          }
           onClick={() => {
-            const muted = nowPlaying?.muted ?? volume === 0;
+            const muted = nowPlaying?.muted === true;
             if (!muted && volume > 0) {
               lastNonZeroVolumeRef.current = volume;
             }
             void runVerb(() => setMute(!muted));
           }}
-          aria-label={volume === 0 ? "Unmute" : "Mute"}
-        >
-          {volume === 0 ? <VolumeX size={iconStd} /> : <Volume2 size={iconStd} />}
-        </button>
+        />
         {showVolumeSteps ? (
         <button
           type="button"

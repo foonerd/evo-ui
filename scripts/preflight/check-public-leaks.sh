@@ -144,16 +144,17 @@ scan_pattern "Real-name attributions" \
 # 8. Engineering-tier repository names.
 #
 # Names of private engineering-tier repositories (evo-internal,
-# evo-core-eng, evo-device-audio-eng, evo-catalogue-schemas,
-# and the ui-eng repo itself) must not appear in shipped source.
-# The public evo-ui / evo-core / evo-device-audio repos exist —
-# those names are fine. Rewrite each hit to describe the artefact
+# evo-core-eng, evo-device-audio-eng, and the ui-eng repo itself)
+# must not appear in shipped source. The public evo-ui / evo-core /
+# evo-device-audio / evo-catalogue-schemas repos exist - those
+# names are fine (the catalogue schemas repository is public: the
+# shelf contracts a plugin author implements). Rewrite each hit to describe the artefact
 # or contract directly ("the framework's list_plugins surface",
 # "the shelf's published schema", "the reference plugin
 # manifest") rather than name-dropping the engineering repo the
 # artefact was authored in.
 scan_pattern "Engineering-tier repository names" \
-    '\b(evo-internal|evo-core-eng|evo-device-audio-eng|evo-catalogue-schemas|evo-ui-eng)\b' \
+    '\b(evo-internal|evo-core-eng|evo-device-audio-eng|evo-ui-eng)\b' \
     '/node_modules/|/dist/'
 
 if [[ "${FAIL}" -ne 0 ]]; then

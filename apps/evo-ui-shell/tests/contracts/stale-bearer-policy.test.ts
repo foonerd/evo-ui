@@ -66,3 +66,98 @@ test("NEVER purge a valid bearer on a transient outage: no purge path when not p
     assert.notEqual(resolveProbeRead({ probing: false, readLanded }), "purge");
   }
 });
+
+// ---- reconnect: the same table, after the first seed ------------------
+//
+// The policy used to run on the FIRST seed only. A bearer that died
+// while the socket was open (24h expiry, a re-provisioned player) left
+// the transport retrying the construction token forever and the surface
+// painted "connected" on its last seed. The reconnect episode composes
+// the same table; nothing below can purge without a landed anonymous
+// read.
+
+import {
+  handshakeBearer,
+  handshakeProtocols,
+  resolveReconnectEpisode,
+  shouldClaimResponder,
+  socketPaint
+} from "../../src/runtime/bearer-handshake.ts";
+
+test("Reconnect with stored bearer + anon read lands -> purge, anonymous retry, surface live", () => {
+  const outcome = resolveReconnectEpisode({
+    hadStoredBearer: true,
+    anonConnected: true,
+    anonReadLanded: true
+  });
+  assert.equal(outcome, "purge-and-retry-anonymous");
+  // After the purge the source reads no bearer: the next handshake is
+  // anonymous (LAN-trust reads keep the surface live).
+  assert.equal(handshakeProtocols(handshakeBearer(() => undefined, "dead")), undefined);
+  assert.equal(socketPaint({ socketOpen: true, episode: outcome }), "connected");
+});
+
+test("Reconnect with stored bearer + anon connect fails -> token kept, not connected", () => {
+  const outcome = resolveReconnectEpisode({
+    hadStoredBearer: true,
+    anonConnected: false,
+    anonReadLanded: false
+  });
+  assert.equal(outcome, "keep-token-not-connected");
+  // The token is still what the next handshake presents (device down is
+  // not a reason to forget a valid pair) and the paint is honest.
+  assert.deepEqual(handshakeProtocols(handshakeBearer(() => "kept", undefined)), [
+    "evo.bearer.kept"
+  ]);
+  assert.equal(socketPaint({ socketOpen: false, episode: outcome }), "disconnected");
+});
+
+test("Reconnect with stored bearer + anon read refused -> back out, keep the token, honest error", () => {
+  const outcome = resolveReconnectEpisode({
+    hadStoredBearer: true,
+    anonConnected: true,
+    anonReadLanded: false
+  });
+  assert.equal(outcome, "backout-keep-token");
+  assert.equal(socketPaint({ socketOpen: false, episode: outcome }), "error");
+});
+
+test("Reconnect with NO bearer is an ordinary outage: no bearer decision", () => {
+  assert.equal(
+    resolveReconnectEpisode({ hadStoredBearer: false, anonConnected: true, anonReadLanded: true }),
+    "no-bearer"
+  );
+});
+
+test("NEVER purge on outage holds across the reconnect episode too", () => {
+  for (const anonReadLanded of [true, false]) {
+    assert.notEqual(
+      resolveReconnectEpisode({ hadStoredBearer: true, anonConnected: false, anonReadLanded }),
+      "purge-and-retry-anonymous"
+    );
+  }
+});
+
+test("`connected` is painted only for an OPEN socket", () => {
+  assert.equal(socketPaint({ socketOpen: false, episode: null }), "disconnected");
+  assert.equal(socketPaint({ socketOpen: true, episode: null }), "connected");
+});
+
+test("the handshake reads the live source, never the construction snapshot", () => {
+  let current: string | undefined = "first";
+  const source = () => current;
+  assert.equal(handshakeBearer(source, "snapshot"), "first");
+  current = "reminted";
+  assert.equal(handshakeBearer(source, "snapshot"), "reminted");
+  current = undefined;
+  assert.equal(handshakeBearer(source, "snapshot"), undefined);
+  // No source: the snapshot is the handshake (fixed-token sockets).
+  assert.equal(handshakeBearer(undefined, "snapshot"), "snapshot");
+  assert.equal(handshakeBearer(undefined, ""), undefined);
+});
+
+test("the responder seat is never claimed without a bearer (LAN-trust cannot hold it)", () => {
+  assert.equal(shouldClaimResponder(undefined), false);
+  assert.equal(shouldClaimResponder(""), false);
+  assert.equal(shouldClaimResponder("paired-or-kiosk"), true);
+});

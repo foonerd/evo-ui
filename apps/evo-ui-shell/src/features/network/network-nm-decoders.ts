@@ -254,6 +254,10 @@ export interface WifiDeviceRow {
   phy: string | null;
   supportsManagedPlusAp: boolean;
   isVirtualAp: boolean;
+  // capability.interface_modes as the device reports it ("managed", "AP",
+  // ...). The radio mode line on Settings -> Network reads it: a radio
+  // that lists no AP mode is never offered an access point.
+  interfaceModes: string[];
 }
 
 // network.nm.wifi_devices returns { radios: [ WifiRadio ] } where each
@@ -276,13 +280,17 @@ export function decodeWifiDevices(raw: unknown): WifiDeviceRow[] {
     const ifname = stringField(row, "ifname");
     if (ifname === null) continue;
     const cap = isObject(row["capability"]) ? row["capability"] : row;
+    const modes = Array.isArray(cap["interface_modes"])
+      ? cap["interface_modes"].filter((m): m is string => typeof m === "string")
+      : [];
     out.push({
       ifname,
       phy: stringField(row, "phy") ?? stringField(cap, "phy"),
       supportsManagedPlusAp: boolField(cap, "supports_managed_plus_ap", false),
       isVirtualAp:
         boolField(row, "is_ap_vif", false) ||
-        boolField(row, "is_virtual_ap_vif", false)
+        boolField(row, "is_virtual_ap_vif", false),
+      interfaceModes: modes
     });
   }
   return out;

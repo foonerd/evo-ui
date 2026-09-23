@@ -36,6 +36,11 @@ import {
   decodeStreamFormatHappening,
   type StreamFormat
 } from "../audio/stream-format-decoders.ts";
+import {
+  PLAYBACK_NOW_PLAYING_SEED_ATTEMPTS,
+  PLAYBACK_NOW_PLAYING_SEED_RETRY_MS,
+  playbackNowPlayingSeedShouldRetry
+} from "./playback-seed.ts";
 
 const PLAYBACK_SHELF = "audio.playback";
 const PAYLOAD_VERSION = 1;
@@ -84,15 +89,32 @@ export function startPlaybackSession(
     // fire-and-forget (below); a slow one completes when it can, and the
     // subscription carries deltas meanwhile - nothing blocks or blanks.
     const seedNowPlaying = async (): Promise<void> => {
-      const initial = await pluginRequest(
-        transport,
-        PLAYBACK_SHELF,
-        "get_now_playing",
-        { v: PAYLOAD_VERSION }
-      );
-      if (!isCancelled() && initial.error === undefined) {
-        const seeded = decodeNowPlaying(initial.value);
-        if (seeded !== null) handlers.onNowPlaying(seeded);
+      for (
+        let attempt = 1;
+        attempt <= PLAYBACK_NOW_PLAYING_SEED_ATTEMPTS;
+        attempt += 1
+      ) {
+        if (isCancelled()) return;
+        const initial = await pluginRequest(
+          transport,
+          PLAYBACK_SHELF,
+          "get_now_playing",
+          { v: PAYLOAD_VERSION }
+        );
+        if (isCancelled()) return;
+        if (initial.error === undefined) {
+          const seeded = decodeNowPlaying(initial.value);
+          if (seeded !== null) handlers.onNowPlaying(seeded);
+          return;
+        }
+        if (!playbackNowPlayingSeedShouldRetry(true, attempt)) return;
+        await new Promise<void>((resolve) => {
+          const id = setTimeout(resolve, PLAYBACK_NOW_PLAYING_SEED_RETRY_MS);
+          teardowns.push(() => {
+            clearTimeout(id);
+            resolve();
+          });
+        });
       }
     };
     const seedStreamFormat = async (): Promise<void> => {

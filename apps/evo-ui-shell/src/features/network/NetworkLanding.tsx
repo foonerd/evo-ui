@@ -6,9 +6,13 @@
 // Data notes: per-interface IP comes from the supervisor device table's
 // `ip4` when present (framework follow-up); until then we fall back to
 // static-from-intent, then the default-route IP for the active uplink,
-// then a dash. The AP tile shows an address + ifname ONLY from a live
-// ap* device in the table; with no live AP it reads Off - never a
-// fabricated gateway or ap0 (hotspot_enabled is intent, not liveness).
+// then a dash. The AP tile shows a name + address ONLY from the live
+// hotspot row in the table - the connected row whose connection is the
+// hotspot profile or whose address is shared, whatever the interface is
+// called; with no such row it reads Off - never a fabricated gateway or
+// ap0 (hotspot_enabled is intent, not liveness).
+// The Wi-Fi tile sets that row aside before it chooses the station, so a
+// radio that is the access point is never painted as the home network.
 
 import { useEffect, useState } from "preact/hooks";
 import type { JSX } from "preact";
@@ -29,6 +33,15 @@ import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 import { useNetworkLink } from "./useNetworkLink";
 import { NETWORK_STATUS_GRACE_MS, statusPaint } from "./network-status-bound";
+import {
+  apDisplayName,
+  findHotspotRow,
+  findStationRow,
+  hotspotConnectionName,
+  isVirtualApIfname,
+  radioMode,
+  stationRadioIfnames
+} from "./network-radio-modes";
 import {
   bandLabel,
   deviceConnected,
@@ -181,8 +194,14 @@ export function NetworkLanding(): JSX.Element {
     return () => window.clearTimeout(id);
   }, [dtLoaded]);
   const ethRow = dt.find((d) => /ethernet/i.test(d.kind ?? "") || /^(eth|en)/i.test(d.ifname));
-  const wifiRow = dt.find((d) => d.ifname === intent.wifi.ifname || (/wifi|wireless/i.test(d.kind ?? "") && !/^ap/i.test(d.ifname)));
-  const apRow = dt.find((d) => /^ap/i.test(d.ifname));
+  // The access point is the connected row whose connection is the hotspot
+  // profile or whose address is shared - by role, whatever the interface
+  // is called. The station is chosen from what is left.
+  const hotspotName = hotspotConnectionName(intent.fallback.hotspot_connection_name);
+  const apRow = findHotspotRow(dt, hotspotName);
+  const wifiRow = findStationRow(dt, intent.wifi.ifname, hotspotName);
+  // What this radio can do, in the hardware's terms; "unknown" says nothing.
+  const mode = radioMode(link.devices);
 
   const ethConnected = deviceConnected(ethRow?.state ?? null);
   const wifiConnected = deviceConnected(wifiRow?.state ?? null);
@@ -217,14 +236,16 @@ export function NetworkLanding(): JSX.Element {
   const wifiSsid = liveSsid || savedSsid;
   const hasWifi = wifiConnected || savedSsid.length > 0;
   // hotspot_enabled is INTENT - it drives the kebab (enable/disable) only.
-  // The card body must reflect a genuinely LIVE ap* device from the
+  // The card body must reflect the genuinely LIVE hotspot row from the
   // supervisor table, never intent, so intent alone can't paint a running
-  // AP with a fabricated 10.42.0.1. No live ap device -> Off, no IP.
-  // Tile sublines are Ethernet / Wi-Fi / Access point — never a kernel ifname.
+  // AP with a fabricated 10.42.0.1. No live hotspot row -> Off, no IP.
+  // The name is the beacon SSID the device reports for that row, then the
+  // saved name, then Unnamed. A station-only radio offers no access point.
   const apEnabled = intent.fallback.hotspot_enabled;
-  const apLive = apRow !== undefined && deviceConnected(apRow.state ?? null);
-  const apName = intent.wifi.ap_ssid.trim();
-  const apLiveIp = apLive && apRow !== undefined ? ipOnly(apRow.ip4 ?? null) : null;
+  const apLive = apRow !== null;
+  const apName = apDisplayName(apRow, intent.wifi.ap_ssid);
+  const apLiveIp = apRow !== null ? ipOnly(apRow.ip4 ?? null) : null;
+  const apOffered = mode !== "station-only";
 
   const close = (): void => setPopup(null);
 
@@ -258,8 +279,15 @@ export function NetworkLanding(): JSX.Element {
       ) : null}
 
       {!authError && link.error !== null ? (
+        // A raw error pinned on the page must still carry the way out:
+        // the same operator refresh the unavailable notice offers. The
+        // non-quiet refresh clears link.error before it re-asks, so a
+        // player that has since answered comes back clean.
         <div className="net-notice">
           <span>{link.error}</span>
+          <button type="button" className="settings-link-button" onClick={() => void link.refresh()}>
+            {t("settings.network.tryAgain")}
+          </button>
         </div>
       ) : null}
 
@@ -326,22 +354,37 @@ export function NetworkLanding(): JSX.Element {
             <Router size={20} className="net-tile-icon" />
             <span className="net-tile-title">{t("settings.network.accessPoint")}</span>
             <Sticker label={apLive ? t("settings.network.enabled") : t("settings.network.apOff")} tone={apLive ? "accent" : "muted"} />
-            <Kebab
-              label={t("settings.network.accessPoint")}
-              items={
-                apEnabled
-                  ? [
-                      { icon: <Router size={16} />, text: t("settings.network.changeApName"), onClick: () => setPopup({ kind: "apEdit" }) },
-                      { text: t("settings.network.disableAp"), danger: true, onClick: () => setPopup({ kind: "apDisable" }) }
-                    ]
-                  : [{ icon: <Router size={16} />, text: t("settings.network.enableAp"), onClick: () => setPopup({ kind: "apEdit" }) }]
-              }
-            />
+            {apOffered ? (
+              <Kebab
+                label={t("settings.network.accessPoint")}
+                items={
+                  apEnabled
+                    ? [
+                        { icon: <Router size={16} />, text: t("settings.network.changeApName"), onClick: () => setPopup({ kind: "apEdit" }) },
+                        { text: t("settings.network.disableAp"), danger: true, onClick: () => setPopup({ kind: "apDisable" }) }
+                      ]
+                    : [{ icon: <Router size={16} />, text: t("settings.network.enableAp"), onClick: () => setPopup({ kind: "apEdit" }) }]
+                }
+              />
+            ) : null}
           </div>
-          <div className="net-tile-name">{apLive ? (apName || t("settings.network.unnamedAp")) : t("settings.network.apOff")}</div>
+          <div className="net-tile-name">
+            {apLive
+              ? (apName ?? t("settings.network.unnamedAp"))
+              : apOffered
+                ? t("settings.network.apOff")
+                : t("settings.network.apNotOffered")}
+          </div>
           {apLiveIp !== null ? <div className="net-tile-ip">{apLiveIp}</div> : null}
           {apLive ? (
             <div className="net-tile-sub">{t("settings.network.hotspotIface") + " · " + t("settings.network.apActive")}</div>
+          ) : null}
+          {mode === "station-only" ? (
+            <div className="net-tile-sub">{t("settings.network.radioStationOnly")}</div>
+          ) : mode === "one-role" ? (
+            <div className="net-tile-sub">{t("settings.network.radioOneRole")}</div>
+          ) : mode === "both-at-once" ? (
+            <div className="net-tile-sub">{t("settings.network.radioBothAtOnce")}</div>
           ) : null}
         </div>
 
@@ -349,7 +392,7 @@ export function NetworkLanding(): JSX.Element {
       </div>
 
       {popup !== null ? (
-        <PopupHost popup={popup} link={link} onClose={close} ethRow={ethRow} wifiRow={wifiRow} />
+        <PopupHost popup={popup} link={link} onClose={close} ethRow={ethRow} wifiRow={wifiRow ?? undefined} />
       ) : null}
       {pairOpen ? (
         <PairDeviceFlow
@@ -367,11 +410,16 @@ export function NetworkLanding(): JSX.Element {
 function AdvancedTile({ link }: { link: Link }): JSX.Element {
   const intent = link.intent;
   const rp = intent.radio_policy;
-  const radios = link.devices.filter((d) => !d.isVirtualAp).map((d) => d.ifname);
-  const physical = radios.length > 0 ? radios : [intent.wifi.ifname];
+  const radios = stationRadioIfnames(link.devices);
+  const physical =
+    radios.length > 0 ? radios : isVirtualApIfname(intent.wifi.ifname) ? ["wlan0"] : [intent.wifi.ifname];
+  const radioValue = physical.includes(intent.wifi.ifname) ? intent.wifi.ifname : physical[0];
+  const stationIntent = radioValue === intent.wifi.ifname
+    ? intent
+    : { ...intent, wifi: { ...intent.wifi, ifname: radioValue } };
 
   const applyRadio = (patch: Partial<NetworkIntent["radio_policy"]>): void => {
-    void link.saveAndApply({ ...intent, radio_policy: { ...rp, ...patch } });
+    void link.saveAndApply({ ...stationIntent, radio_policy: { ...rp, ...patch } });
   };
   const setBand = (which: "band_2ghz" | "band_5ghz" | "band_6ghz"): void => {
     applyRadio({ [which]: !rp[which] } as Partial<NetworkIntent["radio_policy"]>);
@@ -406,9 +454,9 @@ function AdvancedTile({ link }: { link: Link }): JSX.Element {
         <span>{t("settings.network.preferredRadio")}</span>
         <EvoSelect
           ariaLabel={t("settings.network.preferredRadio")}
-          value={intent.wifi.ifname}
+          value={radioValue}
           options={physical.map((r) => ({ value: r, label: r }))}
-          onChange={(v) => link.saveAndApply({ ...intent, wifi: { ...intent.wifi, ifname: v } })}
+          onChange={(v) => link.saveAndApply({ ...stationIntent, wifi: { ...stationIntent.wifi, ifname: v } })}
         />
       </div>
       <div className="net-adv-row">
@@ -429,7 +477,7 @@ function AdvancedTile({ link }: { link: Link }): JSX.Element {
           className={"net-toggle" + (intent.wifi.sta_mac_random ? " on" : "")}
           aria-pressed={intent.wifi.sta_mac_random}
           onClick={() =>
-            void link.saveAndApply({ ...intent, wifi: { ...intent.wifi, sta_mac_random: !intent.wifi.sta_mac_random } })
+            void link.saveAndApply({ ...stationIntent, wifi: { ...stationIntent.wifi, sta_mac_random: !stationIntent.wifi.sta_mac_random } })
           }
         >
           {intent.wifi.sta_mac_random ? t("settings.network.on") : t("settings.network.off")}

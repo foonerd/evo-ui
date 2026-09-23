@@ -16,14 +16,26 @@
 // `available` is the visibility gate: true only when a system.power
 // plugin is admitted. A vendor build that suppressed the plugin
 // leaves it false and the power affordances hidden.
+//
+// Sockets: the reads (list_plugins, the flight-mode read) ride the
+// private anonymous seed socket opened at mount. reboot_device /
+// power_off_device ride a private socket that presents the stored
+// pair / kiosk bearer when one is stored (read at every handshake,
+// rotated by the bearer bus, closed on unmount); with no bearer they
+// stay on the seed socket. The Flight write keeps its own socket on
+// the networking shelf. The seed socket is never given a bearer. See
+// ./power-write-socket.ts.
 
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { WsTransport } from "../../runtime/ws-transport";
+import type { WireOpResult } from "../../sdk/types";
 import { pluginRequest } from "../../runtime/plugin-request-codec";
 import { verbErrorMessage } from "../../runtime/verb-error";
 import { connectWithRetry } from "../../runtime/connect-retry";
-import { storedBearer } from "../../runtime/bearer";
+import { storedBearer, onBearerChange } from "../../runtime/bearer";
+import { onFlightChange, notifyFlightChange } from "../../runtime/flight-bus";
 import { frameworkWsUrl } from "../../runtime/framework-transport";
+import { powerWriteSocket } from "./power-write-socket";
 import { decodeFlightEnabled } from "../network/network-nm-decoders";
 import {
   decodePluginNames,
@@ -127,24 +139,111 @@ export function useSystemPower(): SystemPowerState {
     };
   }, []);
 
+  // Follow every Flight set made elsewhere on this page - Settings >
+  // Network's toggle, another power-cluster instance - by re-reading
+  // the flag from the player on the seed socket. The announced value is
+  // not the truth; the player's answer is. One signal, one anonymous
+  // read: the framework publishes no Flight happening, and this read
+  // never rides a bearer socket. A read that cannot go out leaves the
+  // paint as it was.
+  useEffect(() => {
+    let cancelled = false;
+    const off = onFlightChange(() => {
+      const transport = transportRef.current;
+      if (transport === null) return;
+      void (async (): Promise<void> => {
+        try {
+          const fl = await pluginRequest(transport, NETWORK_SHELF, FLIGHT_GET, {});
+          if (cancelled || fl.error !== undefined) return;
+          const on = decodeFlightEnabled(fl.value);
+          if (on !== null) {
+            setFlightAvailable(true);
+            setFlightEnabled(on);
+          }
+        } catch {
+          // The seed socket could not carry the read: the last painted
+          // state stands until the next signal.
+        }
+      })();
+    });
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, []);
+
+  // The write socket for reboot / power-off in a session with a stored
+  // bearer. Opened lazily on the first bearer verb, reads the bearer at
+  // every handshake, and is re-handshaken by the bearer bus (a pair or
+  // a purge) so it never keeps an identity the session has left.
+  // Closed on unmount. Its own socket: the Flight write is a different
+  // shelf on its own. The seed socket above is never given a bearer:
+  // the reads stay anonymous.
+  //
+  // One bus signal, both bearer sockets: the Flight write socket reads
+  // the bearer at its handshake too, so a pair or a purge re-handshakes
+  // it here as well - now, not on its next accidental drop. (Its close
+  // stays in the seed cleanup above.)
+  const powerTxRef = useRef<WsTransport | null>(null);
+  useEffect(() => {
+    const off = onBearerChange(() => {
+      const tx = powerTxRef.current;
+      if (tx !== null) tx.rotateBearer();
+      const flight = flightTxRef.current;
+      if (flight !== null) flight.rotateBearer();
+    });
+    return () => {
+      off();
+      const tx = powerTxRef.current;
+      powerTxRef.current = null;
+      if (tx !== null) void tx.close();
+    };
+  }, []);
+  const writeTransport = useCallback((): WsTransport | null => {
+    if (powerWriteSocket(storedBearer() !== undefined) === "seed") {
+      return transportRef.current;
+    }
+    let tx = powerTxRef.current;
+    if (tx === null) {
+      // With a bearer stored, a verb never falls back to the seed
+      // socket: no WebSocket means no socket at all.
+      if (typeof WebSocket === "undefined") return null;
+      tx = new WsTransport({ url: frameworkWsUrl(), bearerSource: storedBearer });
+      powerTxRef.current = tx;
+    }
+    return tx;
+  }, []);
+
   // Dispatch a system.power verb through the canonical `request` op.
   // The payload is empty (payload_b64 = ""). On the LAN-trust tier
   // the request admits without a step-up token; the frame carries
   // only request_id / op / payload, as the framework requires.
   const dispatchVerb = useCallback(
     async (requestType: string): Promise<PowerVerbOutcome> => {
-      const transport = transportRef.current;
+      const transport = writeTransport();
       if (transport === null) {
         return { kind: "error", message: "Not connected to the device." };
       }
-      const result = await transport.dispatch("request", {
-        shelf: POWER_SHELF,
-        request_type: requestType,
-        payload_b64: ""
-      });
+      let result: WireOpResult;
+      try {
+        result = await transport.dispatch("request", {
+          shelf: POWER_SHELF,
+          request_type: requestType,
+          payload_b64: ""
+        });
+      } catch (err) {
+        // The write socket could not open (bearer refused at the
+        // upgrade, device down): the verb was never sent, so this is
+        // an honest error - not the fire-and-shutdown drop the
+        // classifier reads as accepted.
+        return {
+          kind: "error",
+          message: err instanceof Error ? err.message : String(err)
+        };
+      }
       return classifyPowerVerbOutcome(result.error);
     },
-    []
+    [writeTransport]
   );
 
   const reboot = useCallback(
@@ -169,14 +268,26 @@ export function useSystemPower(): SystemPowerState {
       if (tx === null) {
         tx = new WsTransport({
           url: frameworkWsUrl(),
-          bearerToken: storedBearer()
+          // Read at every handshake - one bearer bus, no snapshot.
+          bearerSource: storedBearer
         });
         flightTxRef.current = tx;
       }
-      // Mirror the Network panel's set exactly - { enabled } only.
-      const r = await pluginRequest(tx, NETWORK_SHELF, FLIGHT_SET, { enabled });
+      // Mirror the Network panel's set exactly - { enabled } only. A
+      // refused upgrade (dead bearer / device down) rejects the dispatch:
+      // surface it honestly rather than leaving the toggle silent.
+      let r: Awaited<ReturnType<typeof pluginRequest>>;
+      try {
+        r = await pluginRequest(tx, NETWORK_SHELF, FLIGHT_SET, { enabled });
+      } catch (err) {
+        return {
+          ok: false,
+          message: err instanceof Error ? err.message : "Not connected to the device."
+        };
+      }
       if (r.error === undefined) {
         setFlightEnabled(enabled);
+        notifyFlightChange();
         return { ok: true };
       }
       return {

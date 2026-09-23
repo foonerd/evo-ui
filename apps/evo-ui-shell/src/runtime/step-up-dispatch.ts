@@ -102,8 +102,37 @@ export async function dispatchWithStepUp(
     cachedUpFront !== null &&
     bridge !== null
   ) {
+    // The cached sitting rode the first send and the household gate
+    // still refused: that sitting is spent (expired, revoked, a steward
+    // restart). Clear it - and raise the ONE card once, so the operator
+    // gets a fresh sitting instead of a dead end with no card and no
+    // sitting. Cancel returns this original lock. The re-entrancy guard
+    // keeps it to one card app-wide; a card already up means this
+    // dispatch surfaces the lock and does not stack a second.
     bridge.setToken(null);
-    return first;
+    if (NON_ELEVATABLE_OPS.has(op) || TOKEN_KEY in payload || acquiring) {
+      return first;
+    }
+    acquiring = true;
+    let fresh: string | null;
+    try {
+      fresh = await bridge.acquire(op);
+    } finally {
+      acquiring = false;
+    }
+    if (fresh === null) {
+      return first; // operator cancelled - surface the original lock
+    }
+    bridge.setToken(fresh);
+    const retried = await send(op, { ...payload, [TOKEN_KEY]: fresh }, opts);
+    if (retried.error !== undefined && isHouseholdLocked(retried.error)) {
+      // The card was already offered and the gate refused the fresh
+      // sitting too. A sitting the household gate would not spend is
+      // not a live override: clear it, so no gate opens on it, and
+      // surface that lock. One card, no loop.
+      bridge.setToken(null);
+    }
+    return retried;
   }
   if (
     first.error === undefined ||

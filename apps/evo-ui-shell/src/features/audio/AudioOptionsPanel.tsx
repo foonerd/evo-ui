@@ -18,13 +18,16 @@
 //     reported for the fitted board.
 //
 // Long waits use the large multiroom-style HeartbeatPanel. The
-// reboot-required prompt is a modal with a 15 s timeout. The four
-// audio.mixer_transition.* lifecycle outcomes drive the heartbeat
-// (applying), inline banners (applied / rolled_back) and a modal
-// (failed).
+// reboot-required prompt is a modal with a 15 s timeout; the player
+// owns the flag it paints (useHardwareAudio.pendingReboot), and Later /
+// Got it / the timer only dismiss it locally for this pending state -
+// a fresh select / clear, or a reload, shows it again until the host
+// has rebooted. The four audio.mixer_transition.* lifecycle outcomes
+// drive the heartbeat (applying), inline banners (applied /
+// rolled_back) and a modal (failed).
 
 import { Fragment } from "preact";
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import {
   Check,
   ChevronRight,
@@ -46,6 +49,7 @@ import { HeartbeatOverlay } from "../../app/components/HeartbeatOverlay";
 import { MAX_CONNECT_ATTEMPTS } from "../../runtime/connect-retry";
 import { useAudioOptions } from "./useAudioOptions";
 import { useHardwareAudio } from "./useHardwareAudio";
+import { rebootReminderDue } from "./reboot-reminder";
 import { useSystemPower } from "../system/useSystemPower";
 import { DacOverlayManager } from "./DacOverlayManager";
 import { StreamFormatReadout } from "./StreamFormatReadout";
@@ -207,12 +211,26 @@ export function AudioOptionsPanel({
   const [dacError, setDacError] = useState<string | null>(null);
   const [dacBusy, setDacBusy] = useState(false);
 
-  // Reboot-required modal countdown + dispatch state.
+  // Reboot-required modal countdown + dispatch state. The dismissal is
+  // local to this panel and keyed to the player's set_at_ms: Later /
+  // Got it / the timer hide THIS pending state; the player's flag is
+  // never written from here.
   const [rebootCountdown, setRebootCountdown] =
     useState<number>(REBOOT_MODAL_SECONDS);
   const [rebootBusy, setRebootBusy] = useState(false);
   const [rebootAccepted, setRebootAccepted] = useState(false);
   const [rebootError, setRebootError] = useState<string | null>(null);
+  const [rebootDismissedSince, setRebootDismissedSince] = useState<
+    number | null
+  >(null);
+  const rebootReminderDueNow = rebootReminderDue({
+    pending: hw.pendingReboot,
+    since: hw.pendingRebootSince,
+    dismissedSince: rebootDismissedSince
+  });
+  const dismissRebootReminder = useCallback((): void => {
+    setRebootDismissedSince(hw.pendingRebootSince);
+  }, [hw.pendingRebootSince]);
 
   // verify_install self-test state.
   const [verifyReport, setVerifyReport] = useState<VerifyInstallReport | null>(
@@ -308,13 +326,13 @@ export function AudioOptionsPanel({
     setSelectedClass(current?.outputClass ?? fallback ?? null);
   }, [outputs, settings, selectedClass]);
 
-  // Reboot modal: count down from 15 s, then auto-dismiss the
-  // reminder (it acknowledges - it never auto-reboots; a reboot is
-  // always a deliberate click). The countdown is suspended once a
-  // reboot dispatch is in flight. confirmReboot clears the hook's
-  // pendingReboot, so the modal then closes on its own.
+  // Reboot modal: count down from 15 s, then dismiss the reminder
+  // locally (it never auto-reboots; a reboot is always a deliberate
+  // click, and the player's flag stays set until the host has
+  // rebooted). The countdown is suspended once a reboot dispatch is in
+  // flight.
   useEffect(() => {
-    if (!hw.pendingReboot || rebootBusy) {
+    if (!rebootReminderDueNow || rebootBusy) {
       setRebootCountdown(REBOOT_MODAL_SECONDS);
       return undefined;
     }
@@ -326,22 +344,25 @@ export function AudioOptionsPanel({
       if (left <= 0) {
         window.clearInterval(h);
         setRebootCountdown(0);
-        void hw.confirmReboot();
+        dismissRebootReminder();
       } else {
         setRebootCountdown(left);
       }
     }, 1000);
     return () => window.clearInterval(h);
-  }, [hw.pendingReboot, hw.confirmReboot, rebootBusy]);
+    // dismissRebootReminder changes with the player's set_at_ms, so a
+    // fresh flip while the reminder is up restarts the countdown for
+    // the new pending state.
+  }, [rebootReminderDueNow, rebootBusy, dismissRebootReminder]);
 
   // Clear the reboot dispatch state once the prompt is gone.
   useEffect(() => {
-    if (!hw.pendingReboot) {
+    if (!rebootReminderDueNow) {
       setRebootBusy(false);
       setRebootAccepted(false);
       setRebootError(null);
     }
-  }, [hw.pendingReboot]);
+  }, [rebootReminderDueNow]);
 
   // ----- gesture handlers --------------------------------------
 
@@ -1349,7 +1370,7 @@ export function AudioOptionsPanel({
       ) : null}
 
       {/* reboot-required modal -------------------------------- */}
-      {hw.pendingReboot && transitionPhase.kind !== "failed" ? (
+      {rebootReminderDueNow && transitionPhase.kind !== "failed" ? (
         <div
           className="audio-reboot-modal-root"
           role="alertdialog"
@@ -1387,7 +1408,7 @@ export function AudioOptionsPanel({
                     type="button"
                     className="audio-reboot-secondary"
                     disabled={rebootBusy}
-                    onClick={() => void hw.confirmReboot()}
+                    onClick={dismissRebootReminder}
                   >
                     {power.available ? t("audioopt.later") : t("audioopt.gotIt")}
                   </button>

@@ -8,6 +8,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   decodeNowPlaying,
   decodeNowPlayingTrack,
@@ -311,4 +314,52 @@ test("interpolateElapsedMs floors at zero and ignores a backwards clock", () => 
     interpolateElapsedMs({ elapsedMs: -500, atMs: 1_000_000 }, 1_000_000, false, null),
     0
   );
+});
+
+// --- standing-neighbour lock ---------------------------------------
+// Goes red if the decoded now_playing shape moves: a key added or
+// dropped, a fourth transport state, muted no longer a strict boolean.
+
+test("LOCK now_playing: transport_state / track / muted decode to exactly these keys and states", () => {
+  const np = decodeNowPlaying({
+    v: 1,
+    transport_state: "playing",
+    track: { title: "T", artist: "A", album: "B", mpd_path: "p.flac" },
+    elapsed_ms: 1,
+    duration_ms: 2,
+    volume: 3,
+    muted: true,
+    repeat: false,
+    shuffle: false,
+    single: false,
+    consume: false
+  });
+  assert.ok(np !== null);
+  assert.deepEqual(Object.keys(np), [
+    "transportState",
+    "track",
+    "elapsedMs",
+    "durationMs",
+    "volume",
+    "muted",
+    "repeat",
+    "shuffle",
+    "single",
+    "consume"
+  ]);
+  assert.ok(np.track !== null);
+  assert.deepEqual(Object.keys(np.track), ["title", "artist", "album", "mpdPath", "artworkUrl", "classical"]);
+  assert.equal(np.muted, true);
+  assert.equal(decodeNowPlaying({ v: 1, transport_state: "paused", track: null })?.muted, false, "muted absent is false, never undefined");
+  for (const state of ["playing", "paused", "stopped"]) {
+    assert.equal(decodeNowPlaying({ v: 1, transport_state: state })?.transportState, state);
+  }
+  assert.equal(decodeNowPlaying({ v: 1, transport_state: "loading" }), null, "no fourth state");
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(here, "..", "..", "src", "features", "playback", "now-playing-decoders.ts"), "utf8");
+  assert.match(source, /export type TransportState = "playing" \| "paused" \| "stopped";/);
+  assert.match(source, /const transportState = decodeTransportState\(raw\["transport_state"\]\);/);
+  assert.match(source, /track: decodeNowPlayingTrack\(raw\["track"\]\),/);
+  assert.match(source, /muted: boolField\(raw, "muted"\),/);
+  assert.match(source, /const mpdPath = requiredString\(raw, "mpd_path"\);\s*if \(mpdPath === null\) return null;/);
 });

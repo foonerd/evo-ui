@@ -99,21 +99,21 @@ pub fn load_catalogue_shelves(path: &Path) -> HashSet<ShelfKey> {
 /// One UI capability derived from an admitted shelf. Mapping is
 /// deliberately conservative — a shelf must be COVERED by
 /// operator-facing widgets before it appears here; declaring
-/// the shelf alone is not enough. Held at `partial` until the
-/// hardware acceptance matrix signs off.
+/// the shelf alone is not enough. A row is `partial` until the
+/// operator surface over it has passed; then it says `supported`.
 ///
 /// The tuple is `(shelf_key, capability_key, status)`. Adding a
 /// new capability = add one row here. The runtime consults the
 /// admitted-shelves set against this table on every capability
 /// request.
 const SHELF_TO_CAPABILITY: &[(&str, &str, &str)] = &[
-    // Settings → Network operator surface — scan / join,
+    // Settings -> Network operator surface: scan / join,
     // DHCP|static (eth+STA), hotspot, flight, captive, preferred
-    // radio, country + band gates. Wired against the current
-    // wire contract; hardware acceptance across the supported
-    // target triples remains the promotion gate before this
-    // flips to "supported".
-    ("networking.link", "network.settings", "partial"),
+    // radio, country + band gates. Supported when the network
+    // plugin is present: the Owner passed the page, and a badge
+    // that said partial was telling the operator finished work
+    // was not ready.
+    ("networking.link", "network.settings", "supported"),
 ];
 
 /// Return the capabilities the runtime should advertise given
@@ -215,7 +215,7 @@ predicate = "track_of_album"
         let mut set = HashSet::new();
         set.insert("networking.link".to_string());
         let caps = derive_capabilities(&set);
-        assert!(caps.contains(&("network.settings", "partial")));
+        assert!(caps.contains(&("network.settings", "supported")));
     }
 
     #[test]

@@ -16,7 +16,15 @@
 //   network.share.get_state -> { envelope: { share_id, alias,
 //     state, reason, negotiated_vers, last_transition_at_ms } }
 //   network.share.add response: { share_id, mount_report,
-//     mount_error }
+//     mount_error } - mount_error is the human-readable reason when
+//     the initial mount attempt failed (prompt cancelled / timed out,
+//     credential refused, host absent); absent on success. It rides a
+//     SUCCESS envelope: the add verb itself lands, so a caller that
+//     drops the body reports ok and the operator never hears why the
+//     share is not connected. decodeShareMountOutcome below lifts it.
+//   network.share.mount response: { report } - a failed mount refuses
+//     the verb instead (wire error), so its success body never carries
+//     mount_error and decodes ok.
 // State does NOT live on the configured record - it rides the
 // per-share state envelope; the surface merges the two.
 
@@ -40,6 +48,10 @@ export interface ShareRecord {
   username: string | null;
   /** AD workgroup / domain on a user_password credential. */
   domain: string | null;
+  /** Vault key the record's user_password credential reads (never the
+   *  secret). Null on guest / key-file records. An Edit that stocks a
+   *  new password writes this key, not a slug of the current alias. */
+  credentialKey: string | null;
   /** Extra mount options (e.g. vers=2.0,noserverino) appended after the
    *  framework defaults; empty string = none. */
   advancedOptions: string;
@@ -54,6 +66,8 @@ export interface ShareStateInfo {
   state: ShareState;
   reason: string | null;
   negotiated: string | null;
+  /** Wire `last_transition_at_ms`. Null when the body omitted it. */
+  lastTransitionAtMs: number | null;
 }
 
 export interface ConfiguredShares {
@@ -65,6 +79,8 @@ export interface DiscoveredNas {
   host: string;
   dialect: string | null;
   shares: string[];
+  /** SMB unless the discovery record says nfs. */
+  fstype: "cifs" | "nfs";
   alreadyConfigured: boolean;
 }
 
@@ -111,6 +127,7 @@ function decodeShare(raw: unknown): ShareRecord | null {
     credentialsKind: (credsObj !== null ? str(credsObj, "kind") : null) ?? "guest",
     username: credsObj !== null ? str(credsObj, "username") : null,
     domain: credsObj !== null ? str(credsObj, "domain") : null,
+    credentialKey: credsObj !== null ? str(credsObj, "credential_key") : null,
     advancedOptions: str(raw, "advanced_options") ?? "",
     mountRoot: str(raw, "mount_root"),
     persistedVers: str(raw, "persisted_vers")
@@ -124,11 +141,13 @@ export function decodeShareState(raw: unknown): ShareStateInfo | null {
   if (b === null) return null;
   const shareId = str(b, "share_id");
   if (shareId === null) return null;
+  const at = b["last_transition_at_ms"];
   return {
     shareId,
     state: decodeState(b["state"]),
     reason: str(b, "reason"),
-    negotiated: str(b, "negotiated_vers")
+    negotiated: str(b, "negotiated_vers"),
+    lastTransitionAtMs: typeof at === "number" ? at : null
   };
 }
 
@@ -189,6 +208,7 @@ function decodeNas(raw: unknown): DiscoveredNas | null {
     host: host ?? "",
     dialect: str(raw, "advertised_dialect", "negotiated_dialect", "dialect"),
     shares,
+    fstype: raw["fstype"] === "nfs" ? "nfs" : "cifs",
     alreadyConfigured: raw["already_configured"] === true
   };
 }
@@ -222,6 +242,11 @@ export type ShareEventKind =
 
 export interface ShareEventItem {
   shareId: string;
+  /** The share's operator alias as the wire carried it (the plugin
+   *  copies it onto the event when the event is written), else the
+   *  name stamped at ingest from a configured record; null when no
+   *  name is known. Never an id. See share-event-alias.ts. */
+  alias: string | null;
   kind: ShareEventKind;
   /** Failure reason on *_failed events; null otherwise. */
   detail: string | null;
@@ -255,6 +280,9 @@ export function decodeShareEvents(raw: unknown): ShareEventsList | null {
     if (shareId === null || kind === null || typeof atMsRaw !== "number") continue;
     events.push({
       shareId,
+      // str() already treats an empty string as absent: a blank alias
+      // is not a name.
+      alias: str(entry, "alias"),
       kind,
       detail: str(entry, "detail"),
       negotiatedVersion: str(entry, "negotiated_version"),
@@ -271,4 +299,42 @@ export function decodeShareEventsHappening(raw: unknown): ShareEventsList | null
   if (frame["type"] !== "subject_state_changed") return null;
   if (frame["subject_type"] !== "network_share_events") return null;
   return decodeShareEvents(frame["new_state"]);
+}
+
+// ---- add / mount outcome ----------------------------------------------
+
+/** What the add / mount success body said about the mount itself. */
+export interface ShareMountOutcome {
+  /** The plugin's human-readable mount-failure reason, or null when
+   *  the body carries none (mount succeeded, or the verb shape has no
+   *  such field). */
+  mountError: string | null;
+}
+
+/** Decode a `network.share.add` / `network.share.mount` success body.
+ *  Only a non-object body is unrecognised; a body without `mount_error`
+ *  (or with `mount_error: null`) is a clean mount. An empty string is
+ *  treated as absent - there is no reason to show. */
+export function decodeShareMountOutcome(raw: unknown): ShareMountOutcome | null {
+  if (!isObject(raw)) return null;
+  const err = raw["mount_error"];
+  return {
+    mountError: typeof err === "string" && err.length > 0 ? err : null
+  };
+}
+
+/** A verb result the surface can act on: a landed add / mount whose body
+ *  carries `mount_error` is NOT ok - the reason becomes the message the
+ *  surface paints through its existing error line. Refusals pass
+ *  through untouched (subclass kept for the classifier). */
+export function shareMountVerbResult(
+  r:
+    | { ok: true; value: ShareMountOutcome }
+    | { ok: false; message: string; subclass?: string }
+): { ok: true; value: undefined } | { ok: false; message: string; subclass?: string } {
+  if (!r.ok) return r;
+  if (r.value.mountError !== null) {
+    return { ok: false, message: r.value.mountError };
+  }
+  return { ok: true, value: undefined };
 }

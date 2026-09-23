@@ -10,26 +10,43 @@
 // holders verbatim; repair-escalate only after a first RepairFailed; the
 // oversized / hiberfile / unsupported copy strings.
 
-import { useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { Fragment } from "preact";
 import type { JSX } from "preact";
 import { ConfirmDialog, Modal } from "../../components/dialogs";
+import {
+  UsbRemovalHeartbeat,
+  UsbSafeToRemoveModal
+} from "./UsbRemovalHeartbeat";
 import { PairDeviceFlow } from "../pairing/PairDeviceFlow";
 import { isPairRequired, isHouseholdLocked } from "../../runtime/authz-classify";
+import { useHouseholdModal } from "../household/HouseholdModalHost";
 import { reauthPromptResponder } from "../prompts/usePromptResponder";
 import { friendlyVerbError } from "./friendly-error";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
+import { useLibrary } from "../library/useLibrary";
 import { useUsbDrives, type UsbVerbResult } from "./useUsbDrives";
-import type {
-  UsbDrive,
-  UsbDriveClass,
-  UsbIdSource
+import {
+  usbRefuseData,
+  usbRemovalMatches,
+  type UsbDrive,
+  type UsbDriveClass,
+  type UsbIdSource,
+  type UsbRemoval,
+  type UsbRemovalStage
 } from "./usb-drives-decoders";
 
 // Server-side enforced token (USB-STORAGE.md section 3); applied live so
 // submit disables on invalid input.
 const RENAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+
+/** After storage.usb.safe_remove answered ok, how long the glass waits
+ *  for the subject's "safe" frame before it paints "The volume is still
+ *  attached." The plugin announces "safe" before it replies, so this
+ *  only ever fires on a missed frame. It never advances a stage and
+ *  never opens the modal. */
+const USB_REMOVE_SAFE_GRACE_MS = 4000;
 
 function formatSize(bytes: number): string {
   if (bytes <= 0) return "";
@@ -121,6 +138,7 @@ type UsbModal =
 export function UsbDrivesSurface(): JSX.Element {
   useLocale();
   const usb = useUsbDrives();
+  const library = useLibrary();
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const [authRefused, setAuthRefused] = useState(false);
@@ -129,6 +147,21 @@ export function UsbDrivesSurface(): JSX.Element {
   const [modal, setModal] = useState<UsbModal | null>(null);
   const [renameFor, setRenameFor] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const [usbRemove, setUsbRemove] = useState<{
+    stableId: string;
+    librarySourceId: string | null;
+    /** The last stage the subject named for THIS remove; null until it
+     *  names one. */
+    stage: UsbRemovalStage | null;
+    verbDone: boolean;
+  } | null>(null);
+  const [usbSafeModal, setUsbSafeModal] = useState(false);
+  // The removal frame already on the subject at the press - stale by
+  // definition - so only a frame that arrived after it counts.
+  const staleRemovalRef = useRef<UsbRemoval | null>(null);
+  // The one household door (null without a host, e.g. designer / tests:
+  // then the line alone says what happened).
+  const household = useHouseholdModal();
 
   const onPaired = (): void => {
     setAuthRefused(false);
@@ -137,29 +170,32 @@ export function UsbDrivesSurface(): JSX.Element {
     reauthPromptResponder();
   };
 
-  const run = async (
-    fn: () => Promise<UsbVerbResult>,
+  // One classifier for every refused verb, whichever path sent it: the
+  // pair / household doors, the Force fallback on a busy stick, repair
+  // escalation, the copy notices, the friendly message. Force stays the
+  // busy fallback - never the truth path.
+  const refuse = (
+    r: Extract<UsbVerbResult, { ok: false }>,
     drive: UsbDrive,
     ctx: "mount" | "saferemove" | "repair" | "rename"
-  ): Promise<void> => {
-    if (busy) return;
-    setBusy(true);
-    setFeedback("");
-    const r = await fn();
-    setBusy(false);
-    if (r.ok) {
-      return;
-    }
+  ): void => {
     if (isPairRequired(r)) {
       setAuthRefused(true);
       return;
     }
     if (isHouseholdLocked(r)) {
+      // Locked, not idle: the household line, and the door that can
+      // resolve it. Never Pair, never the busy / repair / copy classifiers.
       setAuthRefused(false);
+      setFeedback(t("household.locked.body"));
+      if (household !== null) household.open();
       return;
     }
     const probe = `${r.subclass ?? ""} ${r.message}`.toLowerCase();
-    if (ctx === "saferemove" && /busy|still open|holders/.test(probe)) {
+    // Safe Remove that failed is Force, not "That didn't work."
+    // library.remove_source during an MPD index wraps the USB
+    // refuse so "busy" / holders never reach this probe.
+    if (ctx === "saferemove") {
       setModal({ kind: "force", drive, holders: r.data.holders });
       return;
     }
@@ -176,6 +212,22 @@ export function UsbDrivesSurface(): JSX.Element {
       return;
     }
     setFeedback(friendlyVerbError(r.message));
+  };
+
+  const run = async (
+    fn: () => Promise<UsbVerbResult>,
+    drive: UsbDrive,
+    ctx: "mount" | "saferemove" | "repair" | "rename"
+  ): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setFeedback("");
+    const r = await fn();
+    setBusy(false);
+    if (r.ok) {
+      return;
+    }
+    refuse(r, drive, ctx);
   };
 
   const openRename = (drive: UsbDrive): void => {
@@ -199,10 +251,118 @@ export function UsbDrivesSurface(): JSX.Element {
     await run(() => usb.rename(drive.stableId, alias), drive, "rename");
   };
 
+  // Safe remove: with a library id, one library.remove_source - the
+  // path that drops the queue then detaches. Direct safe_remove only
+  // when there is no library id, or Force (the first attempt has
+  // already released the queue). Stages still follow
+  // storage_usb_drives.removal only. The modal opens when the
+  // subject names "safe", or the row is gone after we started —
+  // not after the verb returns. Force's catalogue drop can still
+  // be waiting on MPD. A leftover safe frame is not ignored; a
+  // later retract must not rewind past safe. No stage is claimed
+  // before a frame names it; no timer advances a stage. A verb
+  // that answered ok with no "safe" and the row still present
+  // inside a bounded wait is a failure paint, never the modal.
+  const runSafeRemove = async (drive: UsbDrive, force = false): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setFeedback("");
+    staleRemovalRef.current = usb.removal;
+    setUsbRemove({
+      stableId: drive.stableId,
+      librarySourceId: drive.librarySourceId,
+      stage: null,
+      verbDone: false
+    });
+    const r: UsbVerbResult =
+      !force && drive.librarySourceId !== null
+        ? await library.removeSource(drive.librarySourceId).then((lr) =>
+            lr.ok
+              ? { ok: true }
+              : {
+                  ok: false,
+                  message: lr.message,
+                  subclass: null,
+                  data: usbRefuseData(null)
+                }
+          )
+        : await usb.safeRemove(
+            drive.stableId,
+            force,
+            drive.librarySourceId
+          );
+    if (!r.ok) {
+      setUsbRemove(null);
+      setBusy(false);
+      refuse(r, drive, "saferemove");
+      return;
+    }
+    setUsbRemove((prev) =>
+      prev !== null && prev.stableId === drive.stableId
+        ? { ...prev, verbDone: true }
+        : prev
+    );
+  };
+
   const renameValid =
     renameDraft.trim().length === 0 || RENAME_RE.test(renameDraft.trim());
 
   const drives = usb.drives;
+  // Stages: from the subject, and only from the subject.
+  useEffect(() => {
+    if (usbRemove === null) return;
+    const incoming = usb.removal;
+    if (incoming === null) return;
+    if (incoming === staleRemovalRef.current && incoming.stage !== "safe") return;
+    if (
+      usbRemovalMatches(incoming, {
+        stableId: usbRemove.stableId,
+        sourceId: usbRemove.librarySourceId ?? undefined
+      }) &&
+      incoming.stage !== usbRemove.stage
+    ) {
+      // Force after a first detach re-announces retract. Do not
+      // rewind past safe — that stuck the heartbeat on
+      // "Updating the library" after the stick was already gone.
+      const order: UsbRemovalStage[] = ["queue", "detach", "eject", "retract", "safe"];
+      const prev = usbRemove.stage;
+      if (
+        prev !== null &&
+        order.indexOf(incoming.stage) < order.indexOf(prev)
+      ) {
+        return;
+      }
+      setUsbRemove({ ...usbRemove, stage: incoming.stage });
+    }
+  }, [usb.removal, usbRemove]);
+
+  // The modal gate: the subject named "safe" (the volume is off
+  // the host). Do not wait for the verb to finish — Force's
+  // catalogue drop waits on an in-flight MPD index and would
+  // leave "Updating the library" up after the stick is gone.
+  // A vanished row after we started is the same signal.
+  useEffect(() => {
+    if (usbRemove === null) return;
+    const gone =
+      drives !== null &&
+      !drives.some((d) => d.stableId === usbRemove.stableId);
+    if (usbRemove.stage === "safe" || (gone && usbRemove.stage !== null)) {
+      setUsbRemove(null);
+      setUsbSafeModal(true);
+      setBusy(false);
+      return;
+    }
+    if (!usbRemove.verbDone) return;
+    // Bounded wait for the frames that should already be in flight.
+    // Past it: a failure paint, not the modal. Never sets a stage.
+    const handle = window.setTimeout(() => {
+      setUsbRemove(null);
+      setBusy(false);
+      setFeedback(t("usb.removeFailed"));
+    }, USB_REMOVE_SAFE_GRACE_MS);
+    return () => window.clearTimeout(handle);
+  }, [usbRemove, drives]);
+
   const managed = (drives ?? []).filter((d) => d.driveClass !== "system-disk");
   const systemDrives = (drives ?? []).filter((d) => d.driveClass === "system-disk");
   const showAuthNotice = authRefused;
@@ -329,9 +489,7 @@ export function UsbDrivesSurface(): JSX.Element {
                   type="button"
                   className="usb-btn"
                   disabled={busy}
-                  onClick={() =>
-                    void run(() => usb.safeRemove(drive.stableId), drive, "saferemove")
-                  }
+                  onClick={() => void runSafeRemove(drive)}
                 >
                   {t("usb.action.saferemove")}
                 </button>
@@ -480,7 +638,7 @@ export function UsbDrivesSurface(): JSX.Element {
           onConfirm={() => {
             const d = modal.drive;
             setModal(null);
-            void run(() => usb.safeRemove(d.stableId, true), d, "saferemove");
+            void runSafeRemove(d, true);
           }}
         />
       ) : null}
@@ -508,6 +666,13 @@ export function UsbDrivesSurface(): JSX.Element {
 
       {pairOpen ? (
         <PairDeviceFlow onClose={() => setPairOpen(false)} onPaired={onPaired} />
+      ) : null}
+
+      {usbRemove !== null ? (
+        <UsbRemovalHeartbeat visible stage={usbRemove.stage} />
+      ) : null}
+      {usbSafeModal ? (
+        <UsbSafeToRemoveModal onAck={() => setUsbSafeModal(false)} />
       ) : null}
     </Fragment>
   );

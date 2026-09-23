@@ -21,13 +21,14 @@
 // also gives the sublabel content time to render before the
 // panel retires for genuinely instant operations.
 //
-// The panel does not portal: it relies on position:fixed to
-// escape any ancestor card. If the shell ever introduces a
-// transform/filter on the root container, this component will
-// need to migrate to a portal.
+// Stacks in the dialog attention band. The framework prompt
+// (password card) must paint above this panel: a Sources add
+// that waits on a secret must not hide that ask under
+// "Finishing the share".
 
 import type { ComponentChildren } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
+import { AttentionOverlay } from "../../components/AttentionLayer";
 
 interface HeartbeatPanelProps {
   /** Parent's "currently waiting" boolean. */
@@ -118,8 +119,14 @@ export function HeartbeatPanel({
     .join(" ");
 
   return (
-    <div className={rootClass} role="status" aria-live="polite">
-      <div className="evo-heartbeat-panel-card">
+    <AttentionOverlay
+      band="dialog"
+      className={rootClass}
+      role="status"
+      ariaLabel={headline}
+      modal={false}
+    >
+      <div className="evo-heartbeat-panel-card" aria-live="polite">
         <span className="evo-heartbeat evo-heartbeat-xl" aria-hidden="true">
           <span className="evo-heartbeat-glyph"></span>
         </span>
@@ -127,7 +134,7 @@ export function HeartbeatPanel({
           <p className="evo-heartbeat-panel-headline">{headline}</p>
         ) : null}
         {sublabel !== undefined ? (
-          <p className="evo-heartbeat-panel-sublabel">{sublabel}</p>
+          <div className="evo-heartbeat-panel-sublabel">{sublabel}</div>
         ) : null}
         {onCancel !== undefined ? (
           <button
@@ -139,6 +146,6 @@ export function HeartbeatPanel({
           </button>
         ) : null}
       </div>
-    </div>
+    </AttentionOverlay>
   );
 }

@@ -307,6 +307,25 @@ export function householdWriteSocket(
   return hasStoredBearer ? "stored-bearer" : "shared";
 }
 
+/** Whether this session may dispatch household_protection_set at all.
+ *
+ *  The framework admits a same-or-narrower set from LAN-trust with no
+ *  sitting (first start has to be possible), so an unpaired browser on
+ *  the LAN could put a player on Play only with no password and leave
+ *  the owner to unlock it. The shell refuses that locally: no stored
+ *  bearer, no set, no unlock - the operator is sent to the existing
+ *  pair door instead. A session WITH a bearer dispatches exactly as
+ *  before, on the socket householdWriteSocket chose. First paint is
+ *  not touched by this: the glass carries its kiosk bearer and a
+ *  browser that has not chosen is sent to pair first. */
+export type HouseholdSetAdmission = "dispatch" | "pair-first";
+
+export function householdSetAdmission(
+  hasStoredBearer: boolean
+): HouseholdSetAdmission {
+  return hasStoredBearer ? "dispatch" : "pair-first";
+}
+
 export function buildSetBody(input: HouseholdSetInput): HouseholdSetBody {
   const body: HouseholdSetBody = { lend: input.lend };
   if (input.level !== undefined) {

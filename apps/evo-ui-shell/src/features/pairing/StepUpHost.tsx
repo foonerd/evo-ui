@@ -21,26 +21,23 @@ import { stepUpVerify, retryAfterMinutes } from "../../runtime/session-trust";
 import { storedBearer } from "../../runtime/bearer";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
-
-interface Pending {
-  resolve: (token: string | null) => void;
-}
+import { createStepUpAcquireLane } from "./step-up-acquire-lane";
 
 export function StepUpHost(): JSX.Element | null {
   useLocale();
-  const [pending, setPending] = useState<Pending | null>(null);
+  const [open, setOpen] = useState(false);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const tokenRef = useRef<string | null>(null);
-  const pendingRef = useRef<Pending | null>(null);
+  const laneRef = useRef(createStepUpAcquireLane());
   const listenersRef = useRef(new Set<(token: string | null) => void>());
-  pendingRef.current = pending;
 
   useEffect(() => {
     const notify = (token: string | null): void => {
       listenersRef.current.forEach((listener) => listener(token));
     };
+    const lane = laneRef.current;
     const bridge: StepUpBridge = {
       getToken: () => tokenRef.current,
       setToken: (token) => {
@@ -49,9 +46,11 @@ export function StepUpHost(): JSX.Element | null {
       },
       acquire: () =>
         new Promise<string | null>((resolve) => {
-          setPassword("");
-          setError(null);
-          setPending({ resolve });
+          if (lane.enqueue(resolve)) {
+            setPassword("");
+            setError(null);
+            setOpen(true);
+          }
         }),
       subscribe: (listener) => {
         listenersRef.current.add(listener);
@@ -66,19 +65,17 @@ export function StepUpHost(): JSX.Element | null {
       setStepUpBridge(null);
       // Resolve any card left open on unmount as a cancel so no caller
       // hangs on the parked promise.
-      if (pendingRef.current !== null) pendingRef.current.resolve(null);
+      if (lane.open) lane.settle(null);
     };
   }, []);
 
   const cancel = (): void => {
-    const p = pendingRef.current;
-    setPending(null);
-    if (p !== null) p.resolve(null);
+    setOpen(false);
+    laneRef.current.settle(null);
   };
 
   const submit = async (): Promise<void> => {
-    const p = pendingRef.current;
-    if (p === null || password.length === 0) return;
+    if (!laneRef.current.open || password.length === 0) return;
     setBusy(true);
     setError(null);
     let verify = await stepUpVerify(password, storedBearer());
@@ -113,11 +110,11 @@ export function StepUpHost(): JSX.Element | null {
     }
     tokenRef.current = verify.value;
     setBusy(false);
-    setPending(null);
-    p.resolve(verify.value);
+    setOpen(false);
+    laneRef.current.settle(verify.value);
   };
 
-  if (pending === null) return null;
+  if (!open) return null;
   return (
     <StepUpConfirm
       icon={<KeyRound size={22} />}

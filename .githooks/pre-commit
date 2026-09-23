@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# Pre-commit guard: runs the public-leak scan before every commit.
+# Refuses commits whose source diff contains the patterns the
+# preflight script names (ADR identifiers, internal-org identifiers,
+# release-version strings, rig identifiers, chunk identifiers,
+# deferral language). Re-run with `git commit` once the punch list
+# is resolved.
+#
+# Install once:
+#     git config core.hooksPath .githooks
+#
+# Bypass is forbidden by project discipline; do not use
+# `git commit --no-verify`. If the scan flags a false positive,
+# update the script's exclusion patterns instead.
+
+set -eo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SCRIPT="${REPO_ROOT}/scripts/preflight/check-public-leaks.sh"
+
+if [[ ! -x "${SCRIPT}" ]]; then
+    echo "pre-commit: ${SCRIPT} missing or not executable; skipping leak scan"
+    exit 0
+fi
+
+if ! "${SCRIPT}"; then
+    echo
+    echo "pre-commit: public-leak scan refused this commit."
+    echo "Resolve the punch list above, then re-run \`git commit\`."
+    exit 1
+fi
+
+# Refuse commit messages whose body / subject contains the same
+# patterns. The body is in COMMIT_EDITMSG when the hook runs at
+# `prepare-commit-msg` stage, but for a generic pre-commit hook
+# we check the staged commit-msg-template if one is present and
+# the standard COMMIT_EDITMSG path.
+MSG_FILE=""
+if [[ -f "${REPO_ROOT}/.git/COMMIT_EDITMSG" ]]; then
+    MSG_FILE="${REPO_ROOT}/.git/COMMIT_EDITMSG"
+fi
+if [[ -n "${MSG_FILE}" ]]; then
+    if grep -qE 'ADR-[0-9]{4}|(framework delivery group|UI team|delivery group)|v?0\.1\.[0-9]+\b|192\.168\.30\.[0-9]+|evoproto|pi5target|x64proto|nucproto|[Ii][Nn][Tt][Rr][Aa][Nn][Ee][Tt]|[Ss]ernik|\(S[0-9][a-z]?\)|\(U[0-9]\)|\bchunk-[0-9]+\b|\bwave-[0-9]+\b|\bdefer(ral)?\b|\bpostpone(d)?\b|\bfollow-on (release|cycle)\b|\bbacklog\b|\bfuture release\b' "${MSG_FILE}" 2>/dev/null; then
+        echo "pre-commit: commit message contains a public-leak pattern. Rewrite descriptively."
+        exit 1
+    fi
+fi
+
+exit 0

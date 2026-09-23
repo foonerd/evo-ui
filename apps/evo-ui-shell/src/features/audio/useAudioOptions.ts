@@ -12,11 +12,22 @@
 // Mirrors the connection + happening-subscription shape of
 // useMultiroomState. Pure decode + reduce logic lives in
 // ./audio-options-decoders.ts so it is unit-tested independently.
+//
+// Sockets: reads (get_settings, list_outputs, list_eq_presets,
+// verify_install) and the happenings subscription ride the private
+// anonymous seed socket opened at mount. WRITES ride a second private
+// socket that presents the stored pair / kiosk bearer when one is
+// stored (read at every handshake, rotated by the bearer bus, closed
+// on unmount); with no bearer they stay on the seed socket. The seed
+// socket is never given a bearer. See ./audio-write-socket.ts.
 
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { WsTransport } from "../../runtime/ws-transport";
+import type { WireOpResult } from "../../sdk/types";
 import { pluginRequest } from "../../runtime/plugin-request-codec";
+import { storedBearer, onBearerChange } from "../../runtime/bearer";
 import { DENY_SPECTRUM_PAYLOAD } from "../../runtime/happenings-filter";
+import { audioWriteSocket } from "./audio-write-socket";
 import {
   connectWithRetry,
   MAX_CONNECT_ATTEMPTS
@@ -391,6 +402,73 @@ export function useAudioOptions(): AudioOptionsState {
     // with empty deps).
   }, [refreshSettings, refreshOutputDevices]);
 
+  // The write socket for a session with a stored bearer. Opened lazily
+  // on the first bearer write, reads the bearer at every handshake, and
+  // is re-handshaken by the bearer bus (a pair or a purge) so it never
+  // keeps an identity the session has left. Closed on unmount. The seed
+  // socket above is never given a bearer: reads and happenings stay
+  // anonymous.
+  const writeTxRef = useRef<WsTransport | null>(null);
+  useEffect(() => {
+    const off = onBearerChange(() => {
+      const tx = writeTxRef.current;
+      if (tx !== null) tx.rotateBearer();
+    });
+    return () => {
+      off();
+      const tx = writeTxRef.current;
+      writeTxRef.current = null;
+      if (tx !== null) void tx.close();
+    };
+  }, []);
+  const writeTransport = useCallback((): WsTransport | null => {
+    if (audioWriteSocket(storedBearer() !== undefined) === "seed") {
+      return transportRef.current;
+    }
+    let tx = writeTxRef.current;
+    if (tx === null) {
+      // With a bearer stored, a write never falls back to the seed
+      // socket: no WebSocket means no socket at all.
+      if (typeof WebSocket === "undefined") return null;
+      tx = new WsTransport({ url: frameworkUrl(), bearerSource: storedBearer });
+      writeTxRef.current = tx;
+    }
+    return tx;
+  }, []);
+
+  // The one write path: pick the socket and send. A write socket that
+  // could not open (bearer refused at the upgrade, device down) is an
+  // error result - an honest refusal on the control, never a throw out
+  // of a setter.
+  const writeRequest = useCallback(
+    async (
+      shelf: string,
+      requestType: string,
+      payload: unknown
+    ): Promise<WireOpResult> => {
+      const tx = writeTransport();
+      if (tx === null) {
+        return {
+          error: {
+            code: "not_connected",
+            message: "Not connected to the audio system."
+          }
+        };
+      }
+      try {
+        return await pluginRequest(tx, shelf, requestType, payload);
+      } catch (err) {
+        return {
+          error: {
+            code: "not_connected",
+            message: err instanceof Error ? err.message : String(err)
+          }
+        };
+      }
+    },
+    [writeTransport]
+  );
+
   // Generic value-setter dispatch. `requestType` is the options.*
   // request type; `value` is the wire value. Routes through the
   // canonical `request` op. Re-reads settings on success so the
@@ -398,21 +476,19 @@ export function useAudioOptions(): AudioOptionsState {
   // happening round-trip.
   const dispatchSetter = useCallback(
     async (requestType: string, value: unknown): Promise<AudioSetterResult> => {
-      const transport = transportRef.current;
-      if (transport === null) {
-        return { ok: false, message: "Not connected to the audio system." };
-      }
-      const result = await pluginRequest(transport, OPTIONS_SHELF, requestType, {
+      const result = await writeRequest(OPTIONS_SHELF, requestType, {
         v: PAYLOAD_VERSION,
         value
       });
       if (result.error !== undefined) {
         return { ok: false, message: errorMessage(result.error) };
       }
-      await refreshSettings(transport);
+      // The re-read is a read: seed socket.
+      const seed = transportRef.current;
+      if (seed !== null) await refreshSettings(seed);
       return { ok: true };
     },
-    [refreshSettings]
+    [writeRequest, refreshSettings]
   );
 
   const setMixerType = useCallback(
@@ -476,12 +552,7 @@ export function useAudioOptions(): AudioOptionsState {
   // hook's settings once the drag settles.
   const setEqBand = useCallback(
     async (index: number, band: EqBand): Promise<AudioSetterResult> => {
-      const transport = transportRef.current;
-      if (transport === null) {
-        return { ok: false, message: "Not connected to the audio system." };
-      }
-      const result = await pluginRequest(
-        transport,
+      const result = await writeRequest(
         OPTIONS_SHELF,
         "options.set_eq_band",
         eqBandToPayload(index, band)
@@ -491,21 +562,16 @@ export function useAudioOptions(): AudioOptionsState {
       }
       return { ok: true };
     },
-    []
+    [writeRequest]
   );
 
   // Composition-mode select routes through the audio.composition
   // shelf. The plugin answers an OK frame whose `status` carries the
   // verdict, so a format refusal is decoded from the value, not the
-  // transport error.
+  // transport error. A write of this panel: it rides the write socket.
   const selectEqMode = useCallback(
     async (on: boolean): Promise<SelectModeOutcome> => {
-      const transport = transportRef.current;
-      if (transport === null) {
-        return { ok: false, reason: "Not connected to the audio system." };
-      }
-      const result = await pluginRequest(
-        transport,
+      const result = await writeRequest(
         COMPOSITION_SHELF,
         "composition.select_mode",
         { v: PAYLOAD_VERSION, mode: on ? "eq_only" : "passthrough" }
@@ -517,7 +583,7 @@ export function useAudioOptions(): AudioOptionsState {
       if (outcome.ok) setEqModeActive(on);
       return outcome;
     },
-    []
+    [writeRequest]
   );
 
   // EQ preset library verbs on the audio.options shelf. recall
@@ -544,65 +610,45 @@ export function useAudioOptions(): AudioOptionsState {
       name: string,
       bands: ReadonlyArray<EqBand>
     ): Promise<AudioSetterResult> => {
-      const transport = transportRef.current;
-      if (transport === null) {
-        return { ok: false, message: "Not connected to the audio system." };
-      }
-      const result = await pluginRequest(
-        transport,
+      const result = await writeRequest(
         OPTIONS_SHELF,
         "options.save_eq_preset",
         { v: PAYLOAD_VERSION, name, bands: bands.map(eqBandToWire) }
       );
       return presetOpResult(result, "The device refused the preset.");
     },
-    []
+    [writeRequest]
   );
 
   const recallEqPreset = useCallback(
     async (name: string): Promise<AudioSetterResult> => {
-      const transport = transportRef.current;
-      if (transport === null) {
-        return { ok: false, message: "Not connected to the audio system." };
-      }
-      const result = await pluginRequest(
-        transport,
+      const result = await writeRequest(
         OPTIONS_SHELF,
         "options.recall_eq_preset",
         { v: PAYLOAD_VERSION, name }
       );
       return presetOpResult(result, "The device could not recall that preset.");
     },
-    []
+    [writeRequest]
   );
 
   const deleteEqPreset = useCallback(
     async (name: string): Promise<AudioSetterResult> => {
-      const transport = transportRef.current;
-      if (transport === null) {
-        return { ok: false, message: "Not connected to the audio system." };
-      }
-      const result = await pluginRequest(
-        transport,
+      const result = await writeRequest(
         OPTIONS_SHELF,
         "options.delete_eq_preset",
         { v: PAYLOAD_VERSION, name }
       );
       return presetOpResult(result, "The device could not delete that preset.");
     },
-    []
+    [writeRequest]
   );
 
   // Resampling carries a `policy` payload, not the generic `value`
   // envelope dispatchSetter sends, so it has its own dispatch.
   const setResampling = useCallback(
     async (policy: ResamplingPolicy): Promise<AudioSetterResult> => {
-      const transport = transportRef.current;
-      if (transport === null) {
-        return { ok: false, message: "Not connected to the audio system." };
-      }
-      const result = await pluginRequest(
-        transport,
+      const result = await writeRequest(
         OPTIONS_SHELF,
         "options.set_resampling",
         {
@@ -618,10 +664,12 @@ export function useAudioOptions(): AudioOptionsState {
       if (result.error !== undefined) {
         return { ok: false, message: errorMessage(result.error) };
       }
-      await refreshSettings(transport);
+      // The re-read is a read: seed socket.
+      const seed = transportRef.current;
+      if (seed !== null) await refreshSettings(seed);
       return { ok: true };
     },
-    [refreshSettings]
+    [writeRequest, refreshSettings]
   );
 
   const verifyInstall = useCallback(async (): Promise<VerifyInstallResult> => {

@@ -898,6 +898,34 @@ export function decodeDacRebootRequired(raw: unknown): boolean {
   return boolField(outcome, "reboot_required") ?? false;
 }
 
+/** The player's reboot-required flag (hardware.audio.confirm_reboot_required
+ *  / the pending_reboot subject). The plugin flips `pending` true on
+ *  every successful select_dac / clear_dac and holds it in memory
+ *  until the host reboots and the plugin restarts; no verb clears it.
+ *  `setAtMs` is the player's timestamp of the flip - the generation a
+ *  local dismissal keys to, so a fresh flip raises the reminder again. */
+export interface PendingReboot {
+  pending: boolean;
+  cause: string;
+  setAtMs: number;
+}
+
+/** Decode the confirm_reboot_required body `{ v, pending_reboot:
+ *  { pending, cause, set_at_ms } }`, or the bare subject state.
+ *  Returns null when `pending` is not a boolean - an unreadable body
+ *  must leave the flag as it is, never clear it. */
+export function decodePendingReboot(raw: unknown): PendingReboot | null {
+  if (!isObject(raw)) return null;
+  const state = isObject(raw["pending_reboot"]) ? raw["pending_reboot"] : raw;
+  const pending = boolField(state, "pending");
+  if (pending === null) return null;
+  return {
+    pending,
+    cause: stringField(state, "cause") ?? "",
+    setAtMs: numberField(state, "set_at_ms") ?? 0
+  };
+}
+
 // =============================================================
 // system.power - host reboot + power-off verbs
 // =============================================================

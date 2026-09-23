@@ -60,6 +60,7 @@ test("live state envelope decodes", () => {
   assert.equal(st.state, "failed");
   assert.ok(st.reason !== null && st.reason.includes("dialect probe"));
   assert.equal(st.negotiated, null);
+  assert.equal(st.lastTransitionAtMs, LIVE_STATE.envelope.last_transition_at_ms);
 });
 
 test("state happening gates on subject type", () => {
@@ -119,7 +120,16 @@ test("discovered nas record decodes (verbatim live shape)", () => {
   assert.equal(n.nas.length, 2);
   assert.equal(n.nas[0].host, "192.0.2.41");
   assert.equal(n.nas[0].dialect, "SMB3_11");
+  assert.equal(n.nas[0].fstype, "cifs");
   assert.deepEqual(n.nas[0].shares, ["nobody"]);
   assert.deepEqual(n.nas[1].shares, ["Music"]);
+  assert.equal(n.nas[1].fstype, "cifs");
   assert.equal(n.nas[1].alreadyConfigured, true);
+  const nfs = decodeDiscoveredNas({
+    envelope: {
+      nas: [{ name: "NAS", ip: "192.0.2.50", fstype: "nfs", shares: [{ name: "/volume1/music" }] }]
+    }
+  });
+  assert.equal(nfs!.nas[0].fstype, "nfs");
+  assert.deepEqual(nfs!.nas[0].shares, ["/volume1/music"]);
 });

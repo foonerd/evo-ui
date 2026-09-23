@@ -176,7 +176,7 @@ export function decodeListSourcesHappening(
 }
 
 /** Live scan phase per the audio_library_scan_progress contract. */
-export type ScanPhase = "scanning" | "complete";
+export type ScanPhase = "scanning" | "complete" | "retracting";
 
 /** One in-flight (or just-terminated) scan for a single source, from
  *  the audio_library_scan_progress subject. `estimatedTotal` is null
@@ -190,6 +190,8 @@ export interface ScanProgressEntry {
   kind: string;
   scannedTracks: number;
   estimatedTotal: number | null;
+  /** Wall-clock start of this scan. Null when the wire omitted it. */
+  startedAtMs: number | null;
   phase: ScanPhase;
 }
 
@@ -217,12 +219,19 @@ export function decodeScanProgressHappening(
       const sourceId = stringField(entry, "source_id");
       const phase = entry["phase"];
       if (sourceId === null) continue;
-      if (phase !== "scanning" && phase !== "complete") continue;
+      if (
+        phase !== "scanning" &&
+        phase !== "complete" &&
+        phase !== "retracting"
+      ) {
+        continue;
+      }
       out.push({
         sourceId,
         kind: stringField(entry, "kind") ?? "",
         scannedTracks: intField(entry, "scanned_tracks") ?? 0,
         estimatedTotal: intField(entry, "estimated_total"),
+        startedAtMs: intField(entry, "started_at_ms"),
         phase
       });
     }

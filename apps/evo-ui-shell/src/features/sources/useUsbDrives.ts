@@ -23,7 +23,8 @@ import {
   usbRefuseData,
   type UsbDrive,
   type UsbDriveSet,
-  type UsbRefuseData
+  type UsbRefuseData,
+  type UsbRemoval
 } from "./usb-drives-decoders";
 
 const SHELF = "storage.usb";
@@ -46,8 +47,14 @@ export interface UseUsbDrivesState {
   connection: SubjectConnectionState;
   /** null until the first read lands. */
   drives: UsbDrive[] | null;
+  /** Last Remove stage on the subject; null when idle. */
+  removal: UsbRemoval | null;
   mount: (stableId: string) => Promise<UsbVerbResult>;
-  safeRemove: (stableId: string, force?: boolean) => Promise<UsbVerbResult>;
+  safeRemove: (
+    stableId: string,
+    force?: boolean,
+    librarySourceId?: string | null
+  ) => Promise<UsbVerbResult>;
   repair: (stableId: string, escalate?: boolean) => Promise<UsbVerbResult>;
   rename: (
     stableId: string,
@@ -69,7 +76,7 @@ function subclassOf(error: unknown): string | null {
 export function useUsbDrives(): UseUsbDrivesState {
   const subject = useShelfSubject<UsbDriveSet>({
     shelf: SHELF,
-    bearerToken: storedBearer(),
+    bearerSource: storedBearer,
     readRequestType: "storage.usb.list_drives",
     decodeRead: decodeUsbDrives,
     decodeHappening: decodeUsbDrivesHappening,
@@ -116,8 +123,12 @@ export function useUsbDrives(): UseUsbDrivesState {
     [dispatch]
   );
   const safeRemove = useCallback(
-    (stableId: string, force = false) =>
-      dispatch("storage.usb.safe_remove", { stable_id: stableId, force }),
+    (stableId: string, force = false, librarySourceId?: string | null) =>
+      dispatch("storage.usb.safe_remove", {
+        stable_id: stableId,
+        force,
+        ...(librarySourceId ? { library_source_id: librarySourceId } : {})
+      }),
     [dispatch]
   );
   const repair = useCallback(
@@ -143,6 +154,7 @@ export function useUsbDrives(): UseUsbDrivesState {
   return {
     connection: subject.connection,
     drives: subject.state === null ? null : subject.state.drives,
+    removal: subject.state === null ? null : subject.state.removal,
     mount,
     safeRemove,
     repair,

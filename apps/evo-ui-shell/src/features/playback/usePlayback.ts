@@ -29,6 +29,7 @@ import {
   writeLastNowPlaying
 } from "./now-playing-cache";
 import type { NowPlaying } from "./now-playing-decoders";
+import { startReanchorDelayMs } from "./playback-clock";
 import type { StreamFormat } from "../audio/stream-format-decoders";
 
 export type PlaybackConnectionKind =
@@ -50,6 +51,11 @@ export type PlaybackVerbResult =
 export interface PlaybackState {
   connection: PlaybackConnectionState;
   nowPlaying: NowPlaying | null;
+  /** Wall-clock time (Date.now()) the current `nowPlaying` sample was
+   *  observed - the one anchor time every progress clock reads. Null
+   *  only while there is no sample. A cached sample restored on a hard
+   *  refresh is stamped at restore time and reconciled by the seed. */
+  nowPlayingObservedAtMs: number | null;
   streamFormat: StreamFormat | null;
   play: () => Promise<PlaybackVerbResult>;
   pause: () => Promise<PlaybackVerbResult>;
@@ -88,11 +94,41 @@ function usePlaybackController(): PlaybackState {
   const [connection, setConnection] = useState<PlaybackConnectionState>({
     kind: "connecting"
   });
-  const [nowPlaying, setNowPlaying] = useState<NowPlaying | null>(() =>
-    readLastNowPlaying()
-  );
+  // The sample and the moment it was observed travel together: every
+  // progress clock on the glass anchors on this one stamp.
+  const [sample, setSample] = useState<{
+    nowPlaying: NowPlaying | null;
+    observedAtMs: number | null;
+  }>(() => {
+    const cached = readLastNowPlaying();
+    return {
+      nowPlaying: cached,
+      observedAtMs: cached === null ? null : Date.now()
+    };
+  });
   const [streamFormat, setStreamFormat] = useState<StreamFormat | null>(null);
   const cancelledRef = useRef(false);
+  // The last sample taken, for the start decision (a start is a playing
+  // sample near the head of a track the previous sample was not already
+  // playing), and the one pending re-anchor read a start schedules.
+  const latestRef = useRef<NowPlaying | null>(sample.nowPlaying);
+  const startReadRef = useRef<number | null>(null);
+
+  const cancelStartRead = useCallback(() => {
+    if (startReadRef.current !== null) {
+      window.clearTimeout(startReadRef.current);
+      startReadRef.current = null;
+    }
+  }, []);
+
+  const takeSample = useCallback(
+    (s: NowPlaying) => {
+      latestRef.current = s;
+      setSample({ nowPlaying: s, observedAtMs: Date.now() });
+      writeLastNowPlaying(s);
+    },
+    []
+  );
 
   useEffect(() => {
     cancelledRef.current = false;
@@ -102,8 +138,24 @@ function usePlaybackController(): PlaybackState {
       },
       onNowPlaying: (s) => {
         if (cancelledRef.current) return;
-        setNowPlaying(s);
-        writeLastNowPlaying(s);
+        const prev = latestRef.current;
+        // A newer sample supersedes any read a start scheduled.
+        cancelStartRead();
+        takeSample(s);
+        // First play of a track: the sample was taken when the verb
+        // was, ahead of the audible start. One get_now_playing read
+        // after the grace re-anchors every clock on what the warden
+        // reports then. One read, on a start, never a cadence.
+        const delay = startReanchorDelayMs(prev, s);
+        if (delay !== null) {
+          startReadRef.current = window.setTimeout(() => {
+            startReadRef.current = null;
+            void refreshNowPlayingSeed(transport).then((result) => {
+              if (cancelledRef.current || !result.ok) return;
+              takeSample(result.value);
+            });
+          }, delay);
+        }
       },
       onStreamFormat: (s) => {
         if (!cancelledRef.current) setStreamFormat(s);
@@ -112,9 +164,10 @@ function usePlaybackController(): PlaybackState {
     });
     return () => {
       cancelledRef.current = true;
+      cancelStartRead();
       session.stop();
     };
-  }, [transport]);
+  }, [transport, cancelStartRead, takeSample]);
 
   const dispatchVerb = useCallback(
     (requestType: string, envelope: Record<string, unknown>) =>
@@ -172,14 +225,15 @@ function usePlaybackController(): PlaybackState {
   const refreshNowPlaying = useCallback(async (): Promise<PlaybackVerbResult> => {
     const result = await refreshNowPlayingSeed(transport);
     if (!result.ok) return result;
-    setNowPlaying(result.value);
-    writeLastNowPlaying(result.value);
+    cancelStartRead();
+    takeSample(result.value);
     return { ok: true };
-  }, [transport]);
+  }, [transport, cancelStartRead, takeSample]);
 
   return {
     connection,
-    nowPlaying,
+    nowPlaying: sample.nowPlaying,
+    nowPlayingObservedAtMs: sample.observedAtMs,
     streamFormat,
     play,
     pause,

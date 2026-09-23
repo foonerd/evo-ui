@@ -26,15 +26,43 @@ export function storedBearer(): string | undefined {
   return token;
 }
 
+// ---- the one bearer bus ---------------------------------------------
+//
+// The stored bearer changes in exactly three ways the page can see: a
+// pair stores one, the stale-bearer policy purges one, the kiosk remints
+// one (written from outside the page, so no event - every handshake
+// reads storedBearer() for that case; see bearer-handshake.ts). The two
+// in-page writes announce themselves here so every live bearer socket
+// re-handshakes at once and a second reload is never needed.
+
+const bearerListeners = new Set<() => void>();
+
+/** Subscribe to in-page bearer writes (store / purge). Returns the
+ *  unsubscribe. */
+export function onBearerChange(listener: () => void): () => void {
+  bearerListeners.add(listener);
+  return (): void => {
+    bearerListeners.delete(listener);
+  };
+}
+
+/** Announce an in-page bearer write to every live bearer socket. */
+export function notifyBearerChange(): void {
+  for (const l of bearerListeners) l();
+}
+
 /** Purge the stored operator bearer. Called ONLY once an anonymous
  *  read has proved the device is reachable while the bearer socket was
  *  refused - i.e. the token itself is dead (device reset, revoked, or
  *  expired), never on a transient outage (which fails anonymously too).
  *  The surface then drops to its unpaired "pair to manage" state with
- *  live read-only content, no site-data clearing or incognito needed. */
+ *  live read-only content, no site-data clearing or incognito needed.
+ *  Announces the purge so every other bearer socket goes anonymous on
+ *  its next handshake, this page load. */
 export function clearBearer(): void {
   if (typeof window === "undefined") return;
   window.localStorage.removeItem("evoBearer");
+  notifyBearerChange();
 }
 
 export function bearerCapabilities(token: string | undefined): BearerCapability[] {

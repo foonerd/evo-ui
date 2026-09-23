@@ -2,7 +2,7 @@
 //
 //   storage.usb.list_drives -> ListDrivesEnvelope
 //   storage_usb_drives subject -> same envelope
-//   { v, drives: [DriveRecord], last_update_at_ms }
+//   { v, drives: [DriveRecord], last_update_at_ms, removal? }
 //
 // DriveRecord + the DriveClass / IdSource unions are normative in
 // plugins/org.evoframework.storage.usb/docs/USB-STORAGE.md sections 5 + 10.
@@ -78,6 +78,69 @@ export interface UsbDrive {
 export interface UsbDriveSet {
   drives: UsbDrive[];
   lastUpdateAtMs: number | null;
+  /** Present while operator Remove is running, or just after. */
+  removal: UsbRemoval | null;
+}
+
+/** Stages `storage.usb.safe_remove` announces as it does the work:
+ *  the stick's tracks leave the queue, then detach, eject, and the
+ *  library update, then safe. */
+export type UsbRemovalStage = "queue" | "detach" | "eject" | "retract" | "safe";
+
+export interface UsbRemoval {
+  stableId: string;
+  librarySourceId: string | null;
+  stage: UsbRemovalStage;
+}
+
+export const USB_REMOVAL_STAGE_ORDER: readonly Exclude<UsbRemovalStage, "safe">[] =
+  ["queue", "detach", "eject", "retract"];
+
+const REMOVAL_STAGES: ReadonlySet<string> = new Set([
+  "queue",
+  "detach",
+  "eject",
+  "retract",
+  "safe"
+]);
+
+function decodeRemoval(raw: unknown): UsbRemoval | null {
+  if (!isObject(raw)) return null;
+  const stableId = str(raw, "stable_id");
+  const stageRaw = str(raw, "stage");
+  if (stableId === null || stageRaw === null || !REMOVAL_STAGES.has(stageRaw)) {
+    return null;
+  }
+  return {
+    stableId,
+    librarySourceId: str(raw, "library_source_id"),
+    stage: stageRaw as UsbRemovalStage
+  };
+}
+
+/** True when a subject removal frame is the Remove this glass started. */
+export function usbRemovalMatches(
+  removal: UsbRemoval | null,
+  query: { sourceId?: string; stableId?: string; mountPath?: string }
+): boolean {
+  if (removal === null) return false;
+  if (
+    query.sourceId !== undefined &&
+    removal.librarySourceId === query.sourceId
+  ) {
+    return true;
+  }
+  if (query.stableId !== undefined && removal.stableId === query.stableId) {
+    return true;
+  }
+  if (query.mountPath !== undefined) {
+    const leaf = query.mountPath
+      .split("/")
+      .filter((p) => p.length > 0)
+      .pop();
+    if (leaf !== undefined && removal.stableId === leaf) return true;
+  }
+  return false;
 }
 
 const ID_SOURCES: ReadonlySet<string> = new Set([
@@ -152,7 +215,8 @@ export function decodeUsbDrives(raw: unknown): UsbDriveSet | null {
   }
   return {
     drives,
-    lastUpdateAtMs: num(b, "last_update_at_ms")
+    lastUpdateAtMs: num(b, "last_update_at_ms"),
+    removal: decodeRemoval(b["removal"])
   };
 }
 

@@ -1,24 +1,21 @@
 // FacetTile - one value in a browse-by-dimension list.
 //
-// Every facet tile (artist, album, genre, year) carries the unified
-// queue/playlist action kebab: Play now / Play next / Add to queue /
-// Save as playlist. Album and artist tiles additionally keep their
-// artwork actions (Refresh image / Clear cached image) below a divider
-// in the same kebab - playback actions on top, artwork maintenance
-// under the separator. Artist and album are cover-forward (they render
-// cover_url as a plain img with a domain glyph fallback); genre and
-// year are value-only labels. Every tile still drills to the value's
-// tracks on tap.
+// Every facet tile (artist, album, genre, year) carries THE browse
+// kebab from browse-kebab.tsx (Play now / Play next / Add to queue /
+// Clear and play / Add to playlist / Save as playlist). Album and
+// artist tiles additionally keep their artwork actions (Refresh
+// image / Clear cached image) below a divider in the same kebab -
+// playback actions on top, artwork maintenance under the separator.
+// Those two artwork rows are not restyled. Artist and album are
+// cover-forward (they render cover_url as a plain img with a domain
+// glyph fallback); genre and year are value-only labels. Every tile
+// still drills to the value's tracks on tap.
 
 import { useEffect, useRef, useState } from "preact/hooks";
 import {
   CalendarDays,
-  CornerDownRight,
   Disc3,
   ImageOff,
-  ListMusic,
-  ListPlus,
-  Play,
   RefreshCw,
   Tags,
   User
@@ -26,11 +23,15 @@ import {
 import type { ComponentChildren } from "preact";
 import { t } from "../../runtime/i18n";
 import { KebabMenu, type KebabMenuItem } from "../../components/KebabMenu";
+import {
+  browseQueueKebabItems,
+  type BrowseQueueMode
+} from "./browse-kebab";
 import { applyArtworkSize, clearArtwork, readArtworkSize } from "./artwork-size";
 import { useArtworkResolvedTick } from "./artwork-resolved";
 import type { FacetEntry, FacetKind } from "./library-decoders";
 
-export type QueueMode = "now" | "next" | "append";
+export type QueueMode = BrowseQueueMode;
 
 interface ClearTarget {
   verb: string;
@@ -43,49 +44,29 @@ interface FacetTileProps {
   viewMode: "list" | "tile";
   busy: boolean;
   onOpen: () => void;
-  /** Queue this facet value: replace-and-play / play-next / append. */
+  /** Queue this facet value: play-now / play-next / append / replace. */
   onQueue?: (mode: QueueMode) => void;
-  /** Save this facet value's tracks as a playlist. */
+  /** Save this facet value's tracks as a new playlist. */
   onSave?: () => void;
+  /** Append this facet value's tracks to an existing playlist. */
+  onAddToPlaylist?: () => void;
 }
 
-/** The universal queue/playlist actions present on every facet tile. */
+/** THE browse kebab, or nothing. A partial handler set does not
+ *  paint a random subset. */
 function queueItems(
   onQueue: ((m: QueueMode) => void) | undefined,
-  onSave: (() => void) | undefined
+  onSave: (() => void) | undefined,
+  onAddToPlaylist: (() => void) | undefined
 ): KebabMenuItem[] {
-  const items: KebabMenuItem[] = [];
-  if (onQueue !== undefined) {
-    items.push(
-      {
-        id: "play-now",
-        icon: <Play size={14} />,
-        label: t("collection.playNow"),
-        onSelect: () => onQueue("now")
-      },
-      {
-        id: "play-next",
-        icon: <CornerDownRight size={14} />,
-        label: t("collection.playNext"),
-        onSelect: () => onQueue("next")
-      },
-      {
-        id: "add-queue",
-        icon: <ListPlus size={14} />,
-        label: t("collection.addToQueue"),
-        onSelect: () => onQueue("append")
-      }
-    );
+  if (
+    onQueue === undefined ||
+    onSave === undefined ||
+    onAddToPlaylist === undefined
+  ) {
+    return [];
   }
-  if (onSave !== undefined) {
-    items.push({
-      id: "save-playlist",
-      icon: <ListMusic size={14} />,
-      label: t("collection.saveAsPlaylist"),
-      onSelect: onSave
-    });
-  }
-  return items;
+  return browseQueueKebabItems({ onQueue, onSave, onAddToPlaylist });
 }
 
 export function FacetTile(props: FacetTileProps) {
@@ -139,7 +120,7 @@ export function FacetTile(props: FacetTileProps) {
 
   // Genre / year: value-only label tile + the queue action kebab.
   const icon = facet === "genre" ? <Tags size={20} /> : <CalendarDays size={20} />;
-  const items = queueItems(props.onQueue, props.onSave);
+  const items = queueItems(props.onQueue, props.onSave, props.onAddToPlaylist);
   return (
     <div
       className={
@@ -174,7 +155,8 @@ function CoverFacetTile({
   sub,
   clearTarget,
   onQueue,
-  onSave
+  onSave,
+  onAddToPlaylist
 }: FacetTileProps & {
   cls: string;
   round?: boolean;
@@ -270,7 +252,7 @@ function CoverFacetTile({
   // Kebab: universal queue actions on top, then artwork maintenance
   // under a divider (album + artist only).
   const items: KebabMenuItem[] = [
-    ...queueItems(onQueue, onSave),
+    ...queueItems(onQueue, onSave, onAddToPlaylist),
     {
       id: "refresh",
       icon: <RefreshCw size={14} />,

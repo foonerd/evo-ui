@@ -77,3 +77,69 @@ export function toggleAfterWrite(
 ): boolean {
   return ok ? attempted : prev;
 }
+
+/** What the brightness slider shows once a write has settled.
+ *
+ *  Brightness echoes live while the finger drags (the thumb must track
+ *  it), so the write is sent with the echo already painted. The player
+ *  is the truth: a write it did not take ("locked" / "blocked") puts the
+ *  slider back to the last value it held - the seed from
+ *  get_display_state, or the last write it accepted. An accepted write
+ *  becomes the new held value. */
+export function brightnessAfterSettle(
+  verdict: KioskWriteVerdict,
+  attempted: number,
+  held: number
+): { show: number; held: number } {
+  return verdict === "ok"
+    ? { show: attempted, held: attempted }
+    : { show: held, held };
+}
+
+/** Which socket a kiosk WRITE rides. A stored kiosk / pair bearer must be
+ *  presented on the write - the shared page socket is anonymous
+ *  LAN-trust and is never given a bearer, so a paired browser's writes
+ *  would otherwise keep riding an identity it has outgrown (and a
+ *  step-up sitting bound to the bearer could never be spent there).
+ *  Reads stay on the shared socket either way. Same rule as the
+ *  household set's write socket. */
+export type KioskWriteSocket = "shared" | "stored-bearer";
+
+export function kioskWriteSocket(hasStoredBearer: boolean): KioskWriteSocket {
+  return hasStoredBearer ? "stored-bearer" : "shared";
+}
+
+/** Bound on the wizard's reset and derive writes. An unsettled
+ *  pluginRequest used to leave the overlay on Preparing / Calculating
+ *  until Cancel. The transport unparks on this signal; the race below
+ *  still leaves the spinner if the transport ignores it. */
+export const KIOSK_CAL_WRITE_DEADLINE_MS = 15_000;
+
+export function abortedKioskCalWrite(): { ok: false; message: "aborted" } {
+  return { ok: false, message: "aborted" };
+}
+
+/** Settle a wizard write when the work returns, rejects, or the
+ *  deadline aborts. Classify the aborted shape as blocked. */
+export function settleKioskCalWrite<T extends { ok: boolean }>(
+  work: Promise<T>,
+  signal: AbortSignal
+): Promise<T | { ok: false; message: "aborted" }> {
+  if (signal.aborted) {
+    return Promise.resolve(abortedKioskCalWrite());
+  }
+  return new Promise((resolve) => {
+    const finish = (value: T | { ok: false; message: "aborted" }): void => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(value);
+    };
+    const onAbort = (): void => {
+      finish(abortedKioskCalWrite());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void work.then(
+      (res) => finish(res),
+      () => finish(abortedKioskCalWrite())
+    );
+  });
+}

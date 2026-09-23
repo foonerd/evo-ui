@@ -67,7 +67,7 @@ export function extraShareToWire(s: SmbExtraShare): {
 export function useSmbServer(): UseSmbServerState {
   const subject = useShelfSubject<SmbServerInfo>({
     shelf: SHELF,
-    bearerToken: storedBearer(),
+    bearerSource: storedBearer,
     readRequestType: "network.smb_server.get_state",
     decodeRead: decodeSmbServer,
     decodeHappening: decodeSmbServerHappening,

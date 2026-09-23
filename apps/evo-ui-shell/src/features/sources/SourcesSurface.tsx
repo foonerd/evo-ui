@@ -4,18 +4,17 @@
 // Without it, every mutating control renders disabled with the
 // reason - same honesty rule as before, now with a real unlock.
 //
-// Add-share dialog per the sources sheet: name, SMB/NFS, host,
-// path, credentials (Guest / User + password - the password itself
-// NEVER has a field here; the plugin asks through the framework
-// prompt card), advanced options. Key-file credentials wait for
-// the vault key flow and say so.
+// Add-share dialog: name, SMB/NFS, host, path, credentials
+// (Guest / User + password on the same dialog), advanced options.
+// The secret rides network.share.add and is vaulted by the plugin.
+// Key-file credentials wait for the vault key flow and say so.
 
 import { useMemo, useState } from "preact/hooks";
 import {
-  AlertTriangle,
   ArrowDownToLine,
   ArrowUpFromLine,
-  Check,
+  Eye,
+  EyeOff,
   HardDrive,
   Library,
   Pencil,
@@ -24,73 +23,39 @@ import {
   RotateCw,
   X
 } from "lucide-preact";
-import type { JSX } from "preact";
-import { reauthPromptResponder, useResponderGranted } from "../prompts/usePromptResponder";
 import {
-  canStartShareAdd,
-  showCredentialResponderNotice
-} from "./share-add-gate";
+  reauthPromptResponder,
+  usePromptListed
+} from "../prompts/usePromptResponder";
+import { HeartbeatPanel } from "../../app/components/HeartbeatPanel";
+import { canStartShareAdd } from "./share-add-gate";
+import { sourcesHeartbeat } from "./share-state-live";
 import {
   useDiscoveredNas,
   useNetworkShares,
   type AddSharePayload,
-  type EditSharePayload,
   type ShareItem
 } from "./useNetworkShares";
-import type { ShareEventKind } from "./share-decoders";
-import { friendlyVerbError } from "./friendly-error";
+import { friendlyShareError } from "./friendly-error";
+import { isShareBusyReason } from "./share-busy";
+import {
+  SHARES_PLUGIN_ID,
+  diffShareEdits,
+  passwordKeyForEdit,
+  shareCredentialKey
+} from "./share-edit";
+import { credentialPut } from "../credentials/credential-ops";
+import { tryUseFrameworkTransport } from "../../runtime/framework-transport";
 import { KebabMenu } from "../../components/KebabMenu";
 import { ConfirmDialog, Modal } from "../../components/dialogs";
 import { PairDeviceFlow } from "../pairing/PairDeviceFlow";
 import { isPairRequired, isHouseholdLocked } from "../../runtime/authz-classify";
+import { useHouseholdModal } from "../household/HouseholdModalHost";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 
 function stateKey(state: ShareItem["state"]): string {
   return `sources.state.${state}`;
-}
-
-/** Reduce a full form payload to the fields that actually changed vs the
- *  existing share, so network.share.edit only touches what the operator
- *  altered (credentials are only re-sent when kind/username/domain change,
- *  so an unrelated edit never re-prompts for the password). */
-function diffShareEdits(share: ShareItem, next: AddSharePayload): EditSharePayload {
-  const edits: EditSharePayload = {};
-  if (next.alias !== share.alias) edits.alias = next.alias;
-  if (next.fstype !== share.fstype) edits.fstype = next.fstype;
-  if (next.host !== share.host) edits.host = next.host;
-  if (next.path !== share.path) edits.path = next.path;
-  const nextAdvanced = next.advanced_options ?? "";
-  if (nextAdvanced !== share.advancedOptions) edits.advanced_options = nextAdvanced;
-  const c = next.credentials;
-  const credChanged =
-    c.kind !== share.credentialsKind ||
-    (c.kind === "user_password" &&
-      (c.username !== (share.username ?? "") ||
-        (c.domain ?? "") !== (share.domain ?? "")));
-  if (credChanged) edits.credentials = c;
-  return edits;
-}
-
-function eventIcon(kind: ShareEventKind): JSX.Element {
-  if (kind === "mounted") return <Check size={14} />;
-  if (kind === "unmounted") return <ArrowDownToLine size={14} />;
-  return <AlertTriangle size={14} />;
-}
-
-function eventLabelKey(kind: ShareEventKind): string {
-  return `sources.event.${kind}`;
-}
-
-/** Locale-aware coarse relative time (snapshot; re-renders on new events). */
-function relTime(atMs: number): string {
-  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
-  const diffS = Math.round((atMs - Date.now()) / 1000);
-  const abs = Math.abs(diffS);
-  if (abs < 60) return rtf.format(diffS, "second");
-  if (abs < 3600) return rtf.format(Math.round(diffS / 60), "minute");
-  if (abs < 86400) return rtf.format(Math.round(diffS / 3600), "hour");
-  return rtf.format(Math.round(diffS / 86400), "day");
 }
 
 type SourcesDialog =
@@ -99,12 +64,16 @@ type SourcesDialog =
       kind: "add";
       prefillHost?: string;
       prefillPath?: string;
+      prefillFstype?: "cifs" | "nfs";
       /** Advertised shares of the discovered device - renders the
        *  picker (Volumio-style) instead of a blank path field. */
       availableShares?: string[];
     }
   | { kind: "edit"; share: ShareItem }
-  | { kind: "remove"; share: ShareItem };
+  | { kind: "remove"; share: ShareItem }
+  /** The USB two-step: a busy Disconnect offers Force as a second,
+   *  explicit press. Never opened by the first press. */
+  | { kind: "force"; share: ShareItem };
 
 export function SourcesSurface({
   onOpenInLibrary
@@ -115,16 +84,23 @@ export function SourcesSurface({
   useLocale();
   const shares = useNetworkShares();
   const discovery = useDiscoveredNas();
-  // Whether THIS session can paint the credential PromptSurface. A user+password
-  // add stocks its secret through that prompt; without the responder the add
-  // must fail closed (see share-add-gate). NOT a network_admin pre-flight.
-  const responderGranted = useResponderGranted();
+  // The shared page socket carries credential_put for a password typed
+  // on Edit (the same path the file-sharing surface stocks an SMB user
+  // on); it elevates through the operator-password card when
+  // write:credentials asks for it.
+  const fwTransport = tryUseFrameworkTransport();
+  // A user+password Add types the secret on this dialog; it rides
+  // network.share.add and the plugin vaults it, then mounts. Edit
+  // stocks a typed password through credential_put first (see runEdit).
   // Household model: adding / managing a share is admitted on LAN-trust and
   // gated by the household policy, NOT by a client-side network_admin
   // pre-flight. We no longer pre-flight Pair (open the form; the dispatch
   // decides). A genuine pair-ceremony refusal still offers Pair below; a
-  // household lock shows the household banner; the credential prompt for a
-  // credentialed SMB add remains a separate responder concern.
+  // household lock after the page is up (a spent override sitting, or a
+  // policy that still locks the verb) paints the one household line and
+  // opens the one household door - the entry gate stays the lock on entry;
+  // the credential prompt for a credentialed SMB add remains a separate
+  // responder concern.
   const [dialog, setDialog] = useState<SourcesDialog>(null);
   const [feedback, setFeedback] = useState<string>("");
   const [busy, setBusy] = useState(false);
@@ -132,6 +108,10 @@ export function SourcesSurface({
   // Set only on a pair-ceremony refusal. Controls stay enabled.
   // Household lock is a different flag; it never opens Pair.
   const [authRefused, setAuthRefused] = useState(false);
+  // The one household door (null without a host, e.g. designer / tests:
+  // then the line alone says what happened).
+  const household = useHouseholdModal();
+  const promptListed = usePromptListed();
 
   const configured = shares.items ?? [];
   const found = discovery.state?.nas ?? [];
@@ -153,14 +133,128 @@ export function SourcesSurface({
         setAuthRefused(true);
         setFeedback("");
       } else if (isHouseholdLocked(r)) {
+        // Locked, not idle: the household line, and the door that can
+        // resolve it. Never Pair.
         setAuthRefused(false);
-        setFeedback("");
+        setFeedback(t("household.locked.body"));
+        if (household !== null) household.open();
       } else {
-        setFeedback(friendlyVerbError(r.message));
+        setFeedback(friendlyShareError(r.message));
       }
     } else {
       setAuthRefused(false);
     }
+  };
+
+  // Disconnect is the USB two-step. The first press is the clean
+  // unmount: network.share.unmount with share_id only - the plugin
+  // releases MPD, then umounts. When the plugin refuses because the
+  // share is still in use, the page line says so in one sentence and
+  // the Force confirm opens. Confirm is the second press: the same verb
+  // with the force flag set, a real lazy detach on the plugin side. A
+  // Force the plugin refuses paints the sentence and opens nothing more.
+  // Holders, ids and the subprocess line never reach this surface.
+  const runUnmount = async (share: ShareItem, force = false): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setFeedback("");
+    const r = await shares.unmount(share.shareId, force ? { force: true } : {});
+    setBusy(false);
+    if (r.ok) {
+      setAuthRefused(false);
+      return;
+    }
+    if (isPairRequired(r)) {
+      setAuthRefused(true);
+      setFeedback("");
+      return;
+    }
+    if (isHouseholdLocked(r)) {
+      setAuthRefused(false);
+      setFeedback(t("household.locked.body"));
+      if (household !== null) household.open();
+      return;
+    }
+    setFeedback(friendlyShareError(r.message));
+    if (!force && isShareBusyReason(r.message)) {
+      setDialog({ kind: "force", share });
+    }
+  };
+
+  // Edit. The field changes ride network.share.edit as a partial. A
+  // password typed on the Edit dialog is stocked FIRST, in the device
+  // vault under the key the record carries after the edit, through the
+  // framework's credential_put - never inside the edit payload, which the
+  // plugin would drop in silence. Then the edit. Then a share that is
+  // not Connected is connected, so the new secret is the one in use. A
+  // Connected share keeps its live session; the new secret takes effect
+  // on its next connect - Disconnect and Connect are the operator's
+  // gestures, never a surprise unmount.
+  const runEdit = async (share: ShareItem, payload: AddSharePayload): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setFeedback("");
+    const edits = diffShareEdits(share, payload);
+    const secret =
+      payload.credentials.kind === "user_password" && payload.password !== undefined
+        ? payload.password
+        : "";
+    if (secret.length > 0) {
+      if (fwTransport === null) {
+        setBusy(false);
+        setFeedback(t("sources.notConnected"));
+        return;
+      }
+      const key = passwordKeyForEdit(share, edits, payload.alias);
+      const put = await credentialPut(fwTransport, {
+        pluginId: SHARES_PLUGIN_ID,
+        key,
+        value: secret,
+        displayName: `network.shares SMB credential - ${key}`,
+        uninstallPolicy: "preserve_for_reinstall"
+      });
+      if (!put.ok) {
+        setBusy(false);
+        const sub = (put.subclass ?? "").toLowerCase();
+        if (sub.includes("write_required") || sub.includes("write:cred")) {
+          setFeedback(t("smb.err.needOperatorPassword"));
+        } else if (sub.includes("vault")) {
+          setFeedback(t("smb.err.vaultUnavailable"));
+        } else {
+          setFeedback(friendlyShareError(put.message));
+        }
+        return;
+      }
+    }
+    if (Object.keys(edits).length > 0) {
+      const r = await shares.edit(share.shareId, edits);
+      if (!r.ok) {
+        setBusy(false);
+        if (isPairRequired(r)) {
+          setAuthRefused(true);
+          setFeedback("");
+          return;
+        }
+        if (isHouseholdLocked(r)) {
+          setAuthRefused(false);
+          setFeedback(t("household.locked.body"));
+          if (household !== null) household.open();
+          return;
+        }
+        setFeedback(friendlyShareError(r.message));
+        return;
+      }
+    }
+    if (secret.length > 0 && share.state !== "mounted") {
+      const m = await shares.mount(share.shareId);
+      if (!m.ok) {
+        setBusy(false);
+        setFeedback(friendlyShareError(m.message));
+        return;
+      }
+    }
+    setBusy(false);
+    setAuthRefused(false);
   };
 
   // Pair is offered ONLY on a genuine pair-ceremony refusal (authRefused),
@@ -168,9 +262,29 @@ export function SourcesSurface({
   // in place; it is not the gate for LAN-trust settings under the household
   // model.
   const showAuthNotice = authRefused;
+  const beat = sourcesHeartbeat(busy, shares.items);
+  // The password card is the wait. A working scrim on top of it
+  // is how the operator never sees the ask.
 
   return (
     <section className="card feature-surface sources-surface">
+      {beat !== null && !promptListed ? (
+        <HeartbeatPanel
+          visible
+          scrim
+          mode="working"
+          headline={
+            beat.kind === "mounting"
+              ? t("sources.heartbeat.connecting", { alias: beat.alias })
+              : t("sources.heartbeat.working")
+          }
+          sublabel={
+            beat.kind === "mounting"
+              ? t("sources.heartbeat.connectingDetail")
+              : t("sources.heartbeat.workingDetail")
+          }
+        />
+      ) : null}
       <div className="feature-head">
         <div>
           <h3>{t("sources.title")}</h3>
@@ -231,7 +345,9 @@ export function SourcesSurface({
                   ) : null}
                 </div>
                 {share.state === "failed" && share.reason !== null ? (
-                  <p className="source-card-error">{share.reason}</p>
+                  <p className="source-card-error">
+                    {friendlyShareError(share.reason)}
+                  </p>
                 ) : null}
               </div>
               <div className="source-card-actions">
@@ -244,11 +360,9 @@ export function SourcesSurface({
                       : t("sources.mount")
                   }
                   onClick={() =>
-                    void run(() =>
-                      share.state === "mounted"
-                        ? shares.unmount(share.shareId)
-                        : shares.mount(share.shareId)
-                    )
+                    share.state === "mounted"
+                      ? void runUnmount(share)
+                      : void run(() => shares.mount(share.shareId))
                   }
                 >
                   {share.state === "mounted" ? (
@@ -292,50 +406,6 @@ export function SourcesSurface({
         </div>
       )}
 
-      {shares.events.length > 0 ? (
-        <>
-          <p className="nav-group-title sources-section-title">{t("sources.activity")}</p>
-          <ul className="sources-activity">
-            {shares.events
-              .slice()
-              .reverse()
-              .slice(0, 12)
-              .map((ev, i) => {
-                const share = configured.find((s) => s.shareId === ev.shareId);
-                const failed =
-                  ev.kind === "mount_failed" || ev.kind === "unmount_failed";
-                return (
-                  <li
-                    key={`${ev.atMs}-${ev.shareId}-${i}`}
-                    className={
-                      failed
-                        ? "sources-activity-item sources-activity-failed"
-                        : "sources-activity-item"
-                    }
-                  >
-                    <span className="sources-activity-icon" aria-hidden>
-                      {eventIcon(ev.kind)}
-                    </span>
-                    <div className="sources-activity-body">
-                      <span className="sources-activity-line">
-                        <strong>{share?.alias ?? ev.shareId}</strong>{" "}
-                        {t(eventLabelKey(ev.kind) as never)}
-                        {ev.negotiatedVersion !== null
-                          ? ` (${ev.negotiatedVersion})`
-                          : ""}
-                      </span>
-                      {failed && ev.detail !== null ? (
-                        <span className="sources-activity-detail">{ev.detail}</span>
-                      ) : null}
-                    </div>
-                    <span className="sources-activity-time">{relTime(ev.atMs)}</span>
-                  </li>
-                );
-              })}
-          </ul>
-        </>
-      ) : null}
-
       <div className="sources-section-head">
         <p className="nav-group-title sources-section-title">{t("sources.discover")}</p>
         <button
@@ -373,8 +443,11 @@ export function SourcesSurface({
                   <p className="source-card-sub">
                     {already ? t("sources.alreadyAdded") : nas.host}
                   </p>
-                  {!already && (nas.dialect !== null || nas.shares.length > 0) ? (
+                  {!already && (nas.fstype === "nfs" || nas.dialect !== null || nas.shares.length > 0) ? (
                     <div className="source-card-chips">
+                      {nas.fstype === "nfs" ? (
+                        <span className="source-chip">NFS</span>
+                      ) : null}
                       {nas.dialect !== null ? (
                         <span className="source-chip">{nas.dialect}</span>
                       ) : null}
@@ -399,6 +472,11 @@ export function SourcesSurface({
                         setDialog({
                           kind: "add",
                           prefillHost: nas.host,
+                          prefillFstype: nas.fstype,
+                          prefillPath:
+                            nas.fstype === "nfs" && nas.shares.length === 1
+                              ? nas.shares[0]
+                              : undefined,
                           availableShares: nas.shares
                         })
                       }
@@ -417,8 +495,8 @@ export function SourcesSurface({
         <AddShareDialog
           prefillHost={dialog.prefillHost}
           prefillPath={dialog.prefillPath}
+          prefillFstype={dialog.prefillFstype}
           availableShares={dialog.availableShares}
-          responderGranted={responderGranted}
           onCancel={() => setDialog(null)}
           onSubmit={(payload) => {
             setDialog(null);
@@ -429,12 +507,11 @@ export function SourcesSurface({
       {dialog?.kind === "edit" ? (
         <AddShareDialog
           editShare={dialog.share}
-          responderGranted={responderGranted}
           onCancel={() => setDialog(null)}
           onSubmit={(payload) => {
             const share = dialog.share;
             setDialog(null);
-            void run(() => shares.edit(share.shareId, diffShareEdits(share, payload)));
+            void runEdit(share, payload);
           }}
         />
       ) : null}
@@ -449,6 +526,20 @@ export function SourcesSurface({
             const id = dialog.share.shareId;
             setDialog(null);
             void run(() => shares.remove(id));
+          }}
+        />
+      ) : null}
+      {dialog?.kind === "force" ? (
+        <ConfirmDialog
+          title={t("sources.force.title", { alias: dialog.share.alias })}
+          message={t("sources.force.message")}
+          confirmLabel={t("sources.force.confirm")}
+          destructive
+          onCancel={() => setDialog(null)}
+          onConfirm={() => {
+            const share = dialog.share;
+            setDialog(null);
+            void runUnmount(share, true);
           }}
         />
       ) : null}
@@ -477,8 +568,8 @@ function AddShareDialog({
   editShare,
   prefillHost,
   prefillPath,
+  prefillFstype,
   availableShares,
-  responderGranted,
   onCancel,
   onSubmit
 }: {
@@ -487,17 +578,15 @@ function AddShareDialog({
   editShare?: ShareItem;
   prefillHost?: string;
   prefillPath?: string;
+  prefillFstype?: "cifs" | "nfs";
   availableShares?: string[];
-  /** Whether this session can paint the credential prompt. A user+password
-   *  submit is blocked (fail closed) when it cannot. */
-  responderGranted: boolean;
   onCancel: () => void;
   onSubmit: (payload: AddSharePayload) => void;
 }) {
   useLocale();
   const [alias, setAlias] = useState(editShare?.alias ?? "");
   const [fstype, setFstype] = useState<"cifs" | "nfs">(
-    editShare?.fstype === "nfs" ? "nfs" : "cifs"
+    editShare?.fstype === "nfs" || prefillFstype === "nfs" ? "nfs" : "cifs"
   );
   const [host, setHost] = useState(editShare?.host ?? prefillHost ?? "");
   const [path, setPath] = useState(editShare?.path ?? prefillPath ?? "");
@@ -506,20 +595,20 @@ function AddShareDialog({
     editShare?.credentialsKind === "user_password" ? "user_password" : "guest"
   );
   const [username, setUsername] = useState(editShare?.username ?? "");
+  const [password, setPassword] = useState("");
+  const [reveal, setReveal] = useState(false);
   const [domain, setDomain] = useState(editShare?.domain ?? "");
   const [advanced, setAdvanced] = useState(editShare?.advancedOptions ?? "");
   const valid =
     alias.trim().length > 0 &&
     host.trim().length > 0 &&
     path.trim().length > 0 &&
-    (credKind === "guest" || username.trim().length > 0);
-  // Valid form starts. User+password prompt paints on the responder
-  // (usually the player), not only on this session. Not a Pair path.
-  const canStart = canStartShareAdd({ valid, credKind, responderGranted });
-  const showResponderNotice = showCredentialResponderNotice({
-    credKind,
-    responderGranted
-  });
+    (credKind === "guest" ||
+      (username.trim().length > 0 &&
+        (editShare !== undefined || password.length > 0)));
+  // Valid form starts. User+password Add requires the secret on
+  // this dialog. Edit may reuse the vaulted secret.
+  const canStart = canStartShareAdd({ valid, credKind });
   return (
     <Modal
       title={editShare ? t("sources.editShare", { alias: editShare.alias }) : t("sources.addShare")}
@@ -530,11 +619,10 @@ function AddShareDialog({
         onSubmit={(event) => {
           event.preventDefault();
           if (!canStart) return;
-          // Vault key derived from the alias. network.share.add
-          // persists, then mount_share → ensure_credential_stocked.
-          // The password is prompted on the responder, stored in
-          // the vault file, never on this form and never on argv.
-          const slug = alias.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+          // Vault key derived from the alias (one definition, shared
+          // with the Edit path). On Add the password rides the verb;
+          // never on argv; the plugin vaults it and mounts. On Edit the
+          // surface stocks it first and the edit carries no secret.
           onSubmit({
             alias: alias.trim(),
             fstype,
@@ -546,11 +634,14 @@ function AddShareDialog({
                 : {
                     kind: "user_password",
                     username: username.trim(),
-                    credential_key: `share.${slug}`,
+                    credential_key: shareCredentialKey(alias),
                     ...(domain.trim().length > 0
                       ? { domain: domain.trim() }
                       : {})
                   },
+            ...(credKind === "user_password" && password.length > 0
+              ? { password }
+              : {}),
             ...(advanced.trim().length > 0
               ? { advanced_options: advanced.trim() }
               : {})
@@ -670,6 +761,28 @@ function AddShareDialog({
               />
             </label>
             <label className="evo-modal-label">
+              {t("sources.form.password")}
+              <span className="password-field">
+                <input
+                  className="evo-modal-input"
+                  type={reveal ? "text" : "password"}
+                  autocomplete="new-password"
+                  placeholder={editShare ? t("sources.form.passwordKeep") : undefined}
+                  value={password}
+                  onInput={(e) => setPassword((e.currentTarget as HTMLInputElement).value)}
+                />
+                <button
+                  type="button"
+                  className="password-reveal-button"
+                  aria-label={reveal ? t("password.hide") : t("password.show")}
+                  aria-pressed={reveal}
+                  onClick={() => setReveal((r) => !r)}
+                >
+                  {reveal ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </span>
+            </label>
+            <label className="evo-modal-label">
               {t("sources.form.domain")}
               <input
                 className="evo-modal-input"
@@ -680,13 +793,6 @@ function AddShareDialog({
                 onInput={(e) => setDomain((e.currentTarget as HTMLInputElement).value)}
               />
             </label>
-            {showResponderNotice ? (
-              <p className="evo-modal-hint sources-form-notice" role="note">
-                {t("sources.form.credentialsNeedResponder")}
-              </p>
-            ) : (
-              <p className="evo-modal-hint">{t("sources.form.passwordViaPrompt")}</p>
-            )}
           </>
         ) : null}
         <label className="evo-modal-label">
@@ -694,7 +800,10 @@ function AddShareDialog({
           <input
             className="evo-modal-input"
             type="text"
-            placeholder="vers=3.1.1,noserverino"
+            // One field for CIFS and NFS: the hint must not be a CIFS
+            // dialect recipe an NFS operator would copy into a mount that
+            // cannot work. Extra mount options only; no vers= default.
+            placeholder={t("sources.form.advancedHint")}
             value={advanced}
             onInput={(e) => setAdvanced((e.currentTarget as HTMLInputElement).value)}
           />

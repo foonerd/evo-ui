@@ -1,0 +1,7 @@
+# Eng-only. Product paths (apps, docs, scripts) stay on the
+# public squash. .github is stripped from staging separately
+# so the public workflow set is preserved.
+DEVELOPING.md
+.githooks
+.scrub-exclude
+.github

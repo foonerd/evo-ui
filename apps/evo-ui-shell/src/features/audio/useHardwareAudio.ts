@@ -12,12 +12,26 @@
 // (another client's gesture, or the bare-overlay failsafe
 // re-publish). The framework's subscribe surface went live this
 // cycle; before that this re-read path was inert.
+//
+// Sockets: reads (list_dac_catalogue, current_config,
+// confirm_reboot_required - the player's reboot-required flag, which
+// the UI never clears - dsp.list_controls, modder.list_overlays) and
+// the happenings subscription ride the private anonymous seed socket
+// opened at mount. The shelf's mutating verbs (the manifest's
+// step_up:audio_admin set) ride a second private socket that presents
+// the stored pair / kiosk bearer when one is stored (read at every
+// handshake, rotated by the bearer bus, closed on unmount); with no
+// bearer they stay on the seed socket. The seed socket is never given
+// a bearer. See ./audio-write-socket.ts.
 
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { WsTransport } from "../../runtime/ws-transport";
+import type { WireOpResult } from "../../sdk/types";
 import { pluginRequest } from "../../runtime/plugin-request-codec";
+import { storedBearer, onBearerChange } from "../../runtime/bearer";
 import { connectWithRetry } from "../../runtime/connect-retry";
 import { DENY_SPECTRUM_PAYLOAD } from "../../runtime/happenings-filter";
+import { audioWriteSocket, isHardwareAudioWrite } from "./audio-write-socket";
 import {
   decodeActiveDacConfig,
   decodeDacCatalogue,
@@ -25,6 +39,7 @@ import {
   decodeDspCapabilities,
   decodeDacRebootRequired,
   decodeModderSurface,
+  decodePendingReboot,
   extractPluginEvent,
   type ActiveDacConfig,
   type DacCatalogueEntry,
@@ -85,8 +100,16 @@ export interface HardwareAudioState {
   /** DSP capability set for the active DAC, or null before first
    *  read. */
   dspCapabilities: DspCapabilities | null;
-  /** True when a select / clear is awaiting a device reboot. */
+  /** The player's reboot-required flag: true from a select / clear
+   *  until the host has rebooted. Seeded from confirm_reboot_required
+   *  at connect and re-read after every gesture and hardware.audio
+   *  happening; the UI never clears it - only the player's own body
+   *  turns it false. */
   pendingReboot: boolean;
+  /** The player's set_at_ms for the current pending state (0 when
+   *  none, or not reported). A local dismissal of the reminder keys
+   *  to it, so a fresh select / clear raises the reminder again. */
+  pendingRebootSince: number;
   /** Registered custom-DAC overlays + the modder surface state, or
    *  null before the first read. */
   modderSurface: ModderSurface | null;
@@ -101,8 +124,6 @@ export interface HardwareAudioState {
   selectDac: (id: string) => Promise<HardwareAudioResult>;
   /** Clear the managed DAC overlay. */
   clearDac: () => Promise<HardwareAudioResult>;
-  /** Acknowledge the reboot prompt (clears the pending state). */
-  confirmReboot: () => Promise<HardwareAudioResult>;
   /** Write a DSP control value. */
   setDspControl: (
     control: string,
@@ -168,6 +189,7 @@ export function useHardwareAudio(): HardwareAudioState {
   const [dspCapabilities, setDspCapabilities] =
     useState<DspCapabilities | null>(null);
   const [pendingReboot, setPendingReboot] = useState(false);
+  const [pendingRebootSince, setPendingRebootSince] = useState(0);
   const [modderSurface, setModderSurface] = useState<ModderSurface | null>(
     null
   );
@@ -209,6 +231,25 @@ export function useHardwareAudio(): HardwareAudioState {
       if (overlays.error === undefined) {
         const decoded = decodeModderSurface(overlays.value);
         if (decoded !== null) setModderSurface(decoded);
+      }
+      // The reboot reminder follows the player: confirm_reboot_required
+      // is a READ of the plugin's in-memory flag, true from a select /
+      // clear until the host has rebooted. Read here so a reload seeds
+      // it and every gesture / happening re-reads it. The body decides;
+      // a read that lands with an unreadable body leaves the flag as it
+      // is - landing is not a clear.
+      const reboot = await pluginRequest(
+        transport,
+        SHELF,
+        "hardware.audio.confirm_reboot_required",
+        { v: PAYLOAD_VERSION }
+      );
+      if (reboot.error === undefined) {
+        const decoded = decodePendingReboot(reboot.value);
+        if (decoded !== null) {
+          setPendingReboot(decoded.pending);
+          setPendingRebootSince(decoded.setAtMs);
+        }
       }
     },
     []
@@ -295,14 +336,52 @@ export function useHardwareAudio(): HardwareAudioState {
     };
   }, [refreshState]);
 
-  // Generic gesture dispatch through the canonical `request` op.
+  // The write socket for a session with a stored bearer. Opened lazily
+  // on the first bearer write, reads the bearer at every handshake, and
+  // is re-handshaken by the bearer bus (a pair or a purge) so it never
+  // keeps an identity the session has left. Closed on unmount. The seed
+  // socket above is never given a bearer: reads and happenings stay
+  // anonymous.
+  const writeTxRef = useRef<WsTransport | null>(null);
+  useEffect(() => {
+    const off = onBearerChange(() => {
+      const tx = writeTxRef.current;
+      if (tx !== null) tx.rotateBearer();
+    });
+    return () => {
+      off();
+      const tx = writeTxRef.current;
+      writeTxRef.current = null;
+      if (tx !== null) void tx.close();
+    };
+  }, []);
+  const writeTransport = useCallback((): WsTransport | null => {
+    if (audioWriteSocket(storedBearer() !== undefined) === "seed") {
+      return transportRef.current;
+    }
+    let tx = writeTxRef.current;
+    if (tx === null) {
+      // With a bearer stored, a write never falls back to the seed
+      // socket: no WebSocket means no socket at all.
+      if (typeof WebSocket === "undefined") return null;
+      tx = new WsTransport({ url: frameworkUrl(), bearerSource: storedBearer });
+      writeTxRef.current = tx;
+    }
+    return tx;
+  }, []);
+
+  // Generic gesture dispatch through the canonical `request` op. The
+  // shelf's mutating verbs ride the write socket; its reads
+  // (confirm_reboot_required among them) stay on the seed socket.
   // Re-reads state on success so the panel reflects persisted truth.
   const dispatch = useCallback(
     async (
       requestType: string,
       payload: Record<string, unknown>
     ): Promise<{ result: HardwareAudioResult; value: unknown }> => {
-      const transport = transportRef.current;
+      const transport = isHardwareAudioWrite(requestType)
+        ? writeTransport()
+        : transportRef.current;
       if (transport === null) {
         return {
           result: {
@@ -312,17 +391,33 @@ export function useHardwareAudio(): HardwareAudioState {
           value: null
         };
       }
-      const r = await pluginRequest(transport, SHELF, requestType, payload);
+      let r: WireOpResult;
+      try {
+        r = await pluginRequest(transport, SHELF, requestType, payload);
+      } catch (err) {
+        // The write socket could not open (bearer refused at the
+        // upgrade, device down): an honest refusal, never a throw out
+        // of a gesture.
+        return {
+          result: {
+            ok: false,
+            message: err instanceof Error ? err.message : String(err)
+          },
+          value: null
+        };
+      }
       if (r.error !== undefined) {
         return {
           result: { ok: false, message: errorMessage(r.error) },
           value: null
         };
       }
-      await refreshState(transport);
+      // The re-read is a read: seed socket.
+      const seed = transportRef.current;
+      if (seed !== null) await refreshState(seed);
       return { result: { ok: true }, value: r.value };
     },
-    [refreshState]
+    [writeTransport, refreshState]
   );
 
   const selectDac = useCallback(
@@ -342,15 +437,6 @@ export function useHardwareAudio(): HardwareAudioState {
       v: PAYLOAD_VERSION
     });
     if (result.ok && decodeDacRebootRequired(value)) setPendingReboot(true);
-    return result;
-  }, [dispatch]);
-
-  const confirmReboot = useCallback(async (): Promise<HardwareAudioResult> => {
-    const { result } = await dispatch(
-      "hardware.audio.confirm_reboot_required",
-      { v: PAYLOAD_VERSION }
-    );
-    if (result.ok) setPendingReboot(false);
     return result;
   }, [dispatch]);
 
@@ -414,12 +500,12 @@ export function useHardwareAudio(): HardwareAudioState {
     activeConfig,
     dspCapabilities,
     pendingReboot,
+    pendingRebootSince,
     modderSurface,
     boardProfile,
     streamFormat,
     selectDac,
     clearDac,
-    confirmReboot,
     setDspControl,
     registerOverlay,
     removeOverlay

@@ -2,11 +2,15 @@
 // per the ruled attention-surfaces sheet (P1-A centered card in the
 // dialog language, P2-A one prompt at a time with a waiting count).
 //
-// Mounted ONCE at App root; renders nothing unless the responder
-// hook is active AND at least one prompt is open. Rides the prompt
-// band (above dialogs and step-up - the framework interrupts the
-// app, not the other way round). No ESC, no backdrop dismiss:
-// Cancel is an explicit wire answer, never an accident.
+// Mounted ONCE at App root; renders nothing unless at least one prompt
+// is listed for this session - every open prompt when it holds the
+// responder seat, or the prompts its own dispatches raised when it does
+// not (the origin door: the glass that submitted Add share paints,
+// answers and cancels its own password card without the seat). Rides
+// the prompt band (above dialogs and step-up - the framework interrupts
+// the app, not the other way round). No ESC, no backdrop dismiss:
+// Cancel is an explicit wire answer, never an accident. The failed-list
+// notice is the seat holder's alone.
 //
 // Passwords: type=password, explicit show toggle, never echoed to
 // assistive tech (the toggle flips the input type only). Unknown
@@ -23,8 +27,29 @@ import { useLocale } from "../../runtime/use-locale";
 export function PromptSurface() {
   useLocale();
   const responder = usePromptResponder();
-  if (responder.status !== "active" || responder.prompts.length === 0) {
-    return null;
+  if (responder.prompts.length === 0) {
+    // Nothing listed for this session. Only the seat holder says when
+    // its last list did not land - with the retry, instead of sitting
+    // silent over a prompt that may be live. A session without the seat
+    // that was refused is silence, not a failed list. Non-modal, in the
+    // prompt band; nothing to seat until a list lands.
+    if (responder.status !== "active" || responder.listError === null) return null;
+    return (
+      <AttentionOverlay band="prompt" className="notif-banner-layer" modal={false}>
+        <div className="notif-banner card" role="status">
+          <div className="notif-row-body">
+            <p className="notif-row-title">{t("prompt.listFailed")}</p>
+          </div>
+          <button
+            type="button"
+            className="settings-link-button"
+            onClick={responder.relist}
+          >
+            {t("prompt.listRetry")}
+          </button>
+        </div>
+      </AttentionOverlay>
+    );
   }
   const current = responder.prompts[0];
   const waiting = responder.prompts.length - 1;

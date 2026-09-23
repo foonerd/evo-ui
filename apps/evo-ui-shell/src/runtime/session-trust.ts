@@ -29,6 +29,7 @@
 // already mounted.
 
 import { WsTransport } from "./ws-transport.ts";
+import { notifyBearerChange } from "./bearer.ts";
 
 /** Same resolution as use-shelf-subject's frameworkUrl (kept local
  *  so this module - and its contract tests - never pull the hook
@@ -239,9 +240,12 @@ function b64UrlUnpadded(bytes: Uint8Array): string {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** Persist the paired bearer for every future transport handshake. */
+/** Persist the paired bearer for every future transport handshake, and
+ *  announce it so every live bearer socket re-handshakes with it now
+ *  (no reload; the prompt seat renegotiates in place). */
 export function storeBearer(token: string): void {
   window.localStorage.setItem("evoBearer", token);
+  notifyBearerChange();
 }
 
 /** Parse retry-after minutes out of a rate-limit refusal message
