@@ -6,7 +6,7 @@
 //   node --experimental-strip-types --test tests/contracts/cut-version.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -17,7 +17,11 @@ const pkg = JSON.parse(readFileSync(join(root, "apps", "evo-ui-shell", "package.
 };
 const cargo = readFileSync(join(root, "apps", "evo-ui-runtime", "Cargo.toml"), "utf8");
 const lock = readFileSync(join(root, "apps", "evo-ui-runtime", "Cargo.lock"), "utf8");
-const workflow = readFileSync(join(root, ".github", "workflows", "publish-pieces.yml"), "utf8");
+// The piece publisher is a public workflow; the squash preserves the
+// public .github/workflows/ and strips the eng one, so this file exists
+// on the public side only. Where it exists it must key on VERSION.
+const workflowPath = join(root, ".github", "workflows", "publish-pieces.yml");
+const workflow = existsSync(workflowPath) ? readFileSync(workflowPath, "utf8") : null;
 const script = readFileSync(join(root, "scripts", "release", "set-cut-version.sh"), "utf8");
 
 test("VERSION is a four-component cut version", () => {
@@ -35,7 +39,11 @@ test("the three-part manifests carry the first three components of V, and nothin
   assert.equal(entry[1], three, "Cargo.lock follows V");
 });
 
-test("the piece publisher keys both slots on VERSION, never on a three-part manifest", () => {
+test("the piece publisher keys both slots on VERSION, never on a three-part manifest", (t) => {
+  if (workflow === null) {
+    t.skip("publish-pieces.yml is a public workflow; pinned on the public side");
+    return;
+  }
   const reads = workflow.match(/VERSION=\$\(tr -d '\[:space:\]' < VERSION\)/g) ?? [];
   assert.equal(reads.length, 2, "ui-shell and ui-runtime both read VERSION");
   assert.ok(!/VERSION=\$\(awk[^\n]*package\.json\)/.test(workflow), "no slot key from package.json");
