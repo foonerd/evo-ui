@@ -31,5 +31,8 @@ export function useStepUpSitting(): StepUpSitting {
     return true;
   }, []);
 
-  return { live, request };
+  // A sitting past its expires_at_ms is no sitting, even before the
+  // store's expiry notice has re-rendered this caller.
+  const bridgeLive = getStepUpBridge()?.getToken() != null;
+  return { live: live && bridgeLive, request };
 }

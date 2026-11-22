@@ -282,7 +282,7 @@ export function UsbDrivesSurface(): JSX.Element {
               : {
                   ok: false,
                   message: lr.message,
-                  subclass: null,
+                  subclass: lr.subclass ?? null,
                   data: usbRefuseData(null)
                 }
           )

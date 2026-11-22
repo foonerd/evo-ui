@@ -22,7 +22,7 @@
 // whether playback starts is the framework's call, so the card
 // button keeps its honest "Load to queue" label).
 
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import {
   ChevronDown,
   ChevronLeft,
@@ -31,6 +31,7 @@ import {
   List,
   ListMusic,
   Loader2,
+  FileUp,
   MoreVertical,
   Music,
   Play,
@@ -38,6 +39,11 @@ import {
   X
 } from "lucide-preact";
 import { usePlaylists } from "./usePlaylists";
+import {
+  importFormatFromFileName,
+  playlistNameFromFileName
+} from "./playlist-import";
+import { offerDownload, playlistMime } from "./offer-download";
 import { useAudioQueue } from "../queue/useAudioQueue";
 import {
   formatRelativeMs,
@@ -55,11 +61,13 @@ import {
 import type { TextOverflowMode } from "../../components/ScrollingText";
 import { t, tn } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
+import { artworkSrc } from "../library/artwork-src";
 
 type PlaylistDialog =
   | null
   | { kind: "create" }
   | { kind: "rename"; current: string }
+  | { kind: "duplicate"; source: string }
   | { kind: "delete"; target: string };
 
 type CollectionViewMode = "list" | "tile";
@@ -192,6 +200,31 @@ export function PlaylistsSurface({
     setDialog({ kind: "create" });
   }, []);
 
+  // Import a playlist file (.m3u / .pls / .cue). The glass reads the
+  // file and sends its text in one write; the plugin stores the
+  // playlist and the index push paints the new card. Nothing is loaded
+  // onto the queue and nothing is written to disk.
+  const importFileRef = useRef<HTMLInputElement | null>(null);
+  const importFile = playlists.importFile;
+  const onPickImportFile = useCallback(() => {
+    importFileRef.current?.click();
+  }, []);
+  const onImportFile = useCallback((input: HTMLInputElement) => {
+    const file = input.files?.[0] ?? null;
+    input.value = "";
+    if (file === null) return;
+    const format = importFormatFromFileName(file.name);
+    if (format === null) {
+      setFeedback(t("playlist.importUnknownFormat", { name: file.name }));
+      return;
+    }
+    const name = playlistNameFromFileName(file.name);
+    void runAction(t("playlist.importAction"), async () => {
+      const content = await file.text();
+      return importFile(name, format, content);
+    });
+  }, [runAction, importFile]);
+
   const onRenamePlaylist = useCallback((name: string) => {
     setMenuFor(null);
     setDialog({ kind: "rename", current: name });
@@ -201,6 +234,28 @@ export function PlaylistsSurface({
     setMenuFor(null);
     setDialog({ kind: "delete", target: name });
   }, []);
+
+  // Duplicate: the card's name is the source; the operator types the
+  // target on the dialog. The send is on the dialog's confirm.
+  const onDuplicatePlaylist = useCallback((name: string) => {
+    setMenuFor(null);
+    setDialog({ kind: "duplicate", source: name });
+  }, []);
+
+  // Download a stored playlist as a file. One request, playlist.export_file
+  // with the name; the answer's content is offered to the browser under
+  // the answer's filename. The device writes nothing and the queue is not
+  // touched.
+  const exportFile = playlists.exportFile;
+  const onDownloadPlaylist = useCallback((name: string) => {
+    setMenuFor(null);
+    void runAction(t("playlist.downloadAction"), async () => {
+      const r = await exportFile(name);
+      if (!r.ok) return r;
+      offerDownload(r.value.filename, r.value.content, playlistMime(r.value.format));
+      return { ok: true };
+    });
+  }, [runAction, exportFile]);
 
   const onLoadToQueue = useCallback(
     (name: string) => {
@@ -373,6 +428,26 @@ export function PlaylistsSurface({
         />
       ) : null}
 
+      {dialog?.kind === "duplicate" ? (
+        <PromptDialog
+          title={t("playlist.duplicateTitle")}
+          label={t("playlist.duplicateLabel", { name: dialog.source })}
+          placeholder={t("playlist.namePlaceholder")}
+          confirmLabel={t("playlist.duplicate")}
+          onCancel={closeDialog}
+          onConfirm={(name) => {
+            closeDialog();
+            if (name === dialog.source) return;
+            // One request: source copied into target. The source stays
+            // the one on screen; the plugin's refusal (an existing
+            // target, favourites) is the answer the operator sees.
+            void runAction(t("playlist.duplicateAction"), () =>
+              playlists.duplicatePlaylist(dialog.source, name)
+            );
+          }}
+        />
+      ) : null}
+
       {dialog?.kind === "delete" ? (
         <ConfirmDialog
           title={t("playlist.deleteTitle")}
@@ -495,7 +570,7 @@ export function PlaylistsSurface({
                 title={item.title ?? item.uri}
                 artist={item.artist}
                 album={item.album}
-                artworkUrl={item.artworkUrl}
+                artworkUrl={artworkSrc(item.artworkHash, item.artworkUrl)}
                 placeholderIcon={<Music size={16} />}
                 classical={showClassicalStrip ? item.classical : null}
                 durationMs={item.durationMs}
@@ -615,6 +690,23 @@ export function PlaylistsSurface({
           <button
             type="button"
             className="playlists-new-button"
+            onClick={onPickImportFile}
+            disabled={busy}
+            title={t("playlist.importHelp")}
+          >
+            <FileUp size={14} />
+            {t("playlist.import")}
+          </button>
+          <input
+            ref={importFileRef}
+            type="file"
+            accept=".m3u,.m3u8,.pls,.cue"
+            style={{ display: "none" }}
+            onChange={(ev) => onImportFile(ev.currentTarget as HTMLInputElement)}
+          />
+          <button
+            type="button"
+            className="playlists-new-button"
             onClick={onCreatePlaylist}
             disabled={busy}
           >
@@ -731,6 +823,28 @@ export function PlaylistsSurface({
                           disabled={busy}
                         >
                           {t("playlist.rename")}
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onDuplicatePlaylist(entry.name);
+                          }}
+                          disabled={busy}
+                        >
+                          {t("playlist.duplicate")}
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onDownloadPlaylist(entry.name);
+                          }}
+                          disabled={busy || entry.itemCount === 0}
+                        >
+                          {t("playlist.download")}
                         </button>
                         <button
                           type="button"

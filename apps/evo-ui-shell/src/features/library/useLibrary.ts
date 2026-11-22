@@ -17,6 +17,7 @@ import { pluginRequest } from "../../runtime/plugin-request-codec";
 import { DENY_SPECTRUM_PAYLOAD } from "../../runtime/happenings-filter";
 import { reconnectDelayMs } from "../../runtime/connect-retry";
 import { t } from "../../runtime/i18n";
+import { storedBearer, onBearerChange } from "../../runtime/bearer";
 import {
   decodeBrowseLibrary,
   decodeDrillTracks,
@@ -26,17 +27,29 @@ import {
   decodeScanProgressHappening,
   type ScanProgressEntry,
   decodeProbeSource,
-  decodeSearchResults,
+  decodeSearchLibrary,
   decodeUpdateSource,
   type BrowseLibraryResponse,
   type FacetBrowseResponse,
+  type FacetEntry,
   type FacetKind,
+  type SearchLibraryResponse,
   type LibraryEntry,
   type ListSourcesResponse,
   type ProbeSourceResponse,
   type SourceRecord,
   type UpdateSourceResponse
 } from "./library-decoders";
+import {
+  decodeMostPlayed,
+  decodeRecentlyPlayed,
+  type PlayCount,
+  type PlayRecord
+} from "./play-history";
+import { forgetTrackPayload } from "./forget-track";
+import { forgetAlbumPayload } from "./forget-album";
+import { decodeSuggestions, suggestPayload } from "./suggest";
+import { refusalSubclass } from "./remove-household";
 
 const LIBRARY_SHELF = "audio.library";
 const PAYLOAD_VERSION = 1;
@@ -58,9 +71,11 @@ export interface LibraryConnectionState {
   attempt?: number;
 }
 
+// A refusal keeps the wire subclass beside the message, so a surface can
+// tell the household lock from any other refusal.
 export type LibraryVerbResult<T = void> =
   | { ok: true; value: T }
-  | { ok: false; message: string };
+  | { ok: false; message: string; subclass?: string | null };
 
 export interface LibraryState {
   connection: LibraryConnectionState;
@@ -104,6 +119,9 @@ export interface LibraryState {
   addSource: (
     payload: Record<string, unknown>
   ) => Promise<LibraryVerbResult<{ sourceId: string }>>;
+  /** One search across enabled sources. The answer's order is the list
+   *  order; stale_sources names what was not searched. The surface
+   *  sends the query alone - no source_ids. */
   searchLibrary: (
     query: string,
     options?: {
@@ -111,7 +129,27 @@ export interface LibraryState {
       includeOffline?: boolean;
       maxResults?: number;
     }
-  ) => Promise<LibraryVerbResult<LibraryEntry[]>>;
+  ) => Promise<LibraryVerbResult<SearchLibraryResponse>>;
+  /** The last plays, newest first. One read with the envelope version
+   *  only: the plugin's default (100) applies. Not tied to a source. */
+  recentlyPlayed: () => Promise<LibraryVerbResult<PlayRecord[]>>;
+  /** Every track finished at least once, highest count first. One read
+   *  with the envelope version only. Not tied to a source. */
+  mostPlayed: () => Promise<LibraryVerbResult<PlayCount[]>>;
+  /** Take one track out of the library the operator browses. The
+   *  file, the source and the live queue are untouched. One write with
+   *  the file's uri; the glass drops the URI from its lists itself. */
+  forgetTrack: (uri: string) => Promise<LibraryVerbResult>;
+  /** Forget every track of an album through the same set, by the
+   *  identity the album drill uses (album_id, else title + parent
+   *  artist). One write; the glass drops the tile itself. */
+  forgetAlbum: (
+    entry: Pick<FacetEntry, "value" | "albumId" | "artist">
+  ) => Promise<LibraryVerbResult>;
+  /** Suggestions for a prefix the operator is still typing. Not the
+   *  search; one read with the prefix alone. The answer's order is the
+   *  list order. */
+  suggest: (prefix: string) => Promise<LibraryVerbResult<string[]>>;
 }
 
 function frameworkUrl(): string {
@@ -163,8 +201,15 @@ export function useLibrary(): LibraryState {
     // and every drop shows the quiet reconnecting hint rather than
     // the first-load "connecting" copy.
     let seeded = false;
-    const transport = new WsTransport({ url: frameworkUrl() });
+    // The library socket presents the stored bearer at every handshake,
+    // so a sitting proved on a paired browser or the glass (bound to that
+    // bearer) is spent by the same identity on Remove and on the handoff
+    // it makes. The bearer bus re-handshakes it after a pair or a purge.
+    const transport = new WsTransport({ url: frameworkUrl(), bearerSource: storedBearer });
     transportRef.current = transport;
+    const offBearer = onBearerChange(() => {
+      transport.rotateBearer();
+    });
     setConnection({ kind: "connecting" });
 
     const refetchSources = async (): Promise<void> => {
@@ -270,6 +315,7 @@ export function useLibrary(): LibraryState {
     return () => {
       cancelled = true;
       offConn();
+      offBearer();
       void transport.close();
       transportRef.current = null;
     };
@@ -295,7 +341,11 @@ export function useLibrary(): LibraryState {
         { v: PAYLOAD_VERSION, ...envelope }
       );
       if (result.error !== undefined) {
-        return { ok: false, message: errorMessage(result.error) };
+        return {
+          ok: false,
+          message: errorMessage(result.error),
+          subclass: refusalSubclass(result.error)
+        };
       }
       if (decoder !== undefined) {
         const decoded = decoder(result.value);
@@ -468,7 +518,7 @@ export function useLibrary(): LibraryState {
       if (options?.sourceIds !== undefined) {
         payload["source_ids"] = options.sourceIds;
       }
-      return dispatch("library.search_library", payload, decodeSearchResults);
+      return dispatch("library.search_library", payload, decodeSearchLibrary);
     },
     [dispatch]
   ) as (
@@ -478,7 +528,35 @@ export function useLibrary(): LibraryState {
       includeOffline?: boolean;
       maxResults?: number;
     }
-  ) => Promise<LibraryVerbResult<LibraryEntry[]>>;
+  ) => Promise<LibraryVerbResult<SearchLibraryResponse>>;
+
+  const recentlyPlayed = useCallback(
+    () => dispatch("library.recently_played", {}, decodeRecentlyPlayed),
+    [dispatch]
+  ) as () => Promise<LibraryVerbResult<PlayRecord[]>>;
+
+  const mostPlayed = useCallback(
+    () => dispatch("library.most_played", {}, decodeMostPlayed),
+    [dispatch]
+  ) as () => Promise<LibraryVerbResult<PlayCount[]>>;
+
+  const forgetTrack = useCallback(
+    (uri: string) => dispatch("library.forget_track", forgetTrackPayload(uri)),
+    [dispatch]
+  ) as (uri: string) => Promise<LibraryVerbResult>;
+
+  const forgetAlbum = useCallback(
+    (entry: Pick<FacetEntry, "value" | "albumId" | "artist">) =>
+      dispatch("library.forget_album", forgetAlbumPayload(entry)),
+    [dispatch]
+  ) as (
+    entry: Pick<FacetEntry, "value" | "albumId" | "artist">
+  ) => Promise<LibraryVerbResult>;
+
+  const suggest = useCallback(
+    (prefix: string) => dispatch("library.suggest", suggestPayload(prefix), decodeSuggestions),
+    [dispatch]
+  ) as (prefix: string) => Promise<LibraryVerbResult<string[]>>;
 
   return {
     connection,
@@ -493,6 +571,11 @@ export function useLibrary(): LibraryState {
     updateSource,
     removeSource,
     addSource,
-    searchLibrary
+    searchLibrary,
+    recentlyPlayed,
+    mostPlayed,
+    forgetTrack,
+    forgetAlbum,
+    suggest
   };
 }

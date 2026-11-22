@@ -16,6 +16,7 @@ import { TrackTile } from "../../components/TrackTile";
 import type { DomainIconResolver } from "../../core/domain-icons";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
+import { artworkSrc } from "../library/artwork-src";
 
 interface ComingNextListProps {
   resolveDomainIcon: DomainIconResolver;
@@ -128,7 +129,7 @@ export function ComingNextList({
                   title={title}
                   artist={item.artist}
                   album={item.album}
-                  artworkUrl={item.artworkUrl}
+                  artworkUrl={artworkSrc(item.artworkHash, item.artworkUrl)}
                   placeholderIcon={<QueueIcon size={18} />}
                   unavailable={unavailable}
                   actions={

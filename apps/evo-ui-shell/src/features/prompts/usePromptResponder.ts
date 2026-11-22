@@ -50,7 +50,10 @@ import { DENY_SPECTRUM_PAYLOAD } from "../../runtime/happenings-filter";
 import { DEFAULT_OPEN_DEADLINE_MS } from "../../runtime/deadline";
 import { storedBearer, onBearerChange } from "../../runtime/bearer";
 import { shouldClaimResponder } from "../../runtime/bearer-handshake";
-import { probeStaleBearer } from "../../runtime/stale-bearer-probe";
+import {
+  probeStaleBearer,
+  type StaleBearerProbeOutcome
+} from "../../runtime/stale-bearer-probe";
 import {
   applyPromptList,
   finishPrompt,
@@ -339,7 +342,7 @@ export function usePromptResponder(): PromptResponderState {
     // stays inactive without a bearer). A failed anonymous connect keeps
     // the token: the device is down.
     let probeInFlight = false;
-    const probe = async (): Promise<"purge" | "device-down" | "backout" | "cancelled"> => {
+    const probe = async (): Promise<StaleBearerProbeOutcome> => {
       if (probeInFlight) return "cancelled";
       probeInFlight = true;
       try {

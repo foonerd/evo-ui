@@ -15,9 +15,6 @@ import { canRunPrivilegedOperation, needsStepUpReauth } from "../../core/operati
 interface OperationsSurfaceProps {
   logLevelStatus: CapabilityStatus;
   diagnosticsStatus: CapabilityStatus;
-  updatesChannelStatus: CapabilityStatus;
-  updatesCoreStatus: CapabilityStatus;
-  updatesPluginsStatus: CapabilityStatus;
   pluginLifecycleStatus: CapabilityStatus;
   sshStatus: CapabilityStatus;
   client: GatewayClient;
@@ -28,9 +25,6 @@ interface OperationsSurfaceProps {
 export function OperationsSurface({
   logLevelStatus,
   diagnosticsStatus,
-  updatesChannelStatus,
-  updatesCoreStatus,
-  updatesPluginsStatus,
   pluginLifecycleStatus,
   sshStatus,
   client,
@@ -40,9 +34,6 @@ export function OperationsSurface({
   const status = combineCapabilityStatuses([
     logLevelStatus,
     diagnosticsStatus,
-    updatesChannelStatus,
-    updatesCoreStatus,
-    updatesPluginsStatus,
     pluginLifecycleStatus,
     sshStatus
   ]);
@@ -108,7 +99,7 @@ export function OperationsSurface({
     <CapabilityGate
       title="Operations & Admin"
       status={status}
-      description="Maintenance, update channels, plugin lifecycle, and SSH controls."
+      description="Maintenance, plugin lifecycle, and SSH controls."
       partialHint="Privileged operations require active step-up session and policy checks."
     >
       <div className="browse-grid">
@@ -122,16 +113,6 @@ export function OperationsSurface({
       <div className="queue-state">
         <strong>Step-up:</strong>{" "}
         {stepUpActive ? `active (${stepUpRemainingSeconds}s remaining)` : "required"}
-      </div>
-      <div className="browse-grid">
-        <div className="queue-state">
-          <strong>Core channel:</strong> {state.updates?.channels.core ?? "n/a"} | pending{" "}
-          {state.updates?.pending.core ?? 0}
-        </div>
-        <div className="queue-state">
-          <strong>Plugins channel:</strong> {state.updates?.channels.plugins ?? "n/a"} | pending{" "}
-          {state.updates?.pending.plugins ?? 0}
-        </div>
       </div>
       <div className="action-row">
         <button
@@ -203,68 +184,6 @@ export function OperationsSurface({
           }}
         >
           Diagnostics bundle
-        </button>
-      </div>
-      <div className="action-row">
-        <button
-          type="button"
-          disabled={!canRunPrivilegedOperation(updatesChannelStatus, stepUpActive) || action.loading}
-          onClick={() => {
-            void runPrivilegedAction({
-              action: "set-channel-core",
-              inFlightLabel: "operations:channel-core",
-              execute: (token) => client.setUpdateChannel("core", "production", token),
-              successPrefix: "Core channel set to production",
-              onFinally: () => void state.refresh()
-            });
-          }}
-        >
-          Core channel: production
-        </button>
-        <button
-          type="button"
-          disabled={!canRunPrivilegedOperation(updatesChannelStatus, stepUpActive) || action.loading}
-          onClick={() => {
-            void runPrivilegedAction({
-              action: "set-channel-plugins",
-              inFlightLabel: "operations:channel-plugins",
-              execute: (token) => client.setUpdateChannel("plugins", "test", token),
-              successPrefix: "Plugin channel set to test",
-              onFinally: () => void state.refresh()
-            });
-          }}
-        >
-          Plugin channel: test
-        </button>
-        <button
-          type="button"
-          disabled={!canRunPrivilegedOperation(updatesCoreStatus, stepUpActive) || action.loading}
-          onClick={() => {
-            void runPrivilegedAction({
-              action: "apply-core-update",
-              inFlightLabel: "operations:apply-core",
-              execute: (token) => client.applyUpdate("core", token),
-              successPrefix: "Core update apply requested",
-              onFinally: () => void state.refresh()
-            });
-          }}
-        >
-          Apply core update
-        </button>
-        <button
-          type="button"
-          disabled={!canRunPrivilegedOperation(updatesPluginsStatus, stepUpActive) || action.loading}
-          onClick={() => {
-            void runPrivilegedAction({
-              action: "apply-plugin-updates",
-              inFlightLabel: "operations:apply-plugins",
-              execute: (token) => client.applyUpdate("plugins", token),
-              successPrefix: "Plugin update apply requested",
-              onFinally: () => void state.refresh()
-            });
-          }}
-        >
-          Apply plugin updates
         </button>
       </div>
       <div className="action-row">

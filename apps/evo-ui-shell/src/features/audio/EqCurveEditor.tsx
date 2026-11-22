@@ -27,7 +27,12 @@ interface EqCurveEditorProps {
   /** True while a transition / gesture locks the controls. */
   disabled: boolean;
   onSelect: (index: number) => void;
+  /** Live value while a gesture is in progress: the curve follows, nothing
+   *  is written. */
   onBandChange: (index: number, band: EqBand) => void;
+  /** The gesture ended (pointer up or cancel on a handle, release of the Q
+   *  slider): the parent writes the band once. */
+  onBandCommit: (index: number) => void;
 }
 
 // SVG plot geometry (viewBox units). The horizontal gutters are
@@ -72,7 +77,8 @@ export function EqCurveEditor({
   engaged,
   disabled,
   onSelect,
-  onBandChange
+  onBandChange,
+  onBandCommit
 }: EqCurveEditorProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<number>(-1);
@@ -115,7 +121,11 @@ export function EqCurveEditor({
     onBandChange(i, clampEqBand({ ...bands[i], ...moved }));
   };
   const onPointerUp = (): void => {
+    const i = dragRef.current;
     dragRef.current = -1;
+    // One write per gesture: the band is committed when the drag ends,
+    // whatever happened to the pointer in between.
+    if (i >= 0) onBandCommit(i);
   };
 
   const sel = bands[selectedIndex] ?? bands[0];
@@ -230,6 +240,7 @@ export function EqCurveEditor({
                 })
               )
             }
+            onChange={() => onBandCommit(selectedIndex)}
           />
           <strong>{sel.q.toFixed(1)}</strong>
         </label>

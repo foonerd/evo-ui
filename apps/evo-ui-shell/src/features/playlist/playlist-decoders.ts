@@ -2,6 +2,7 @@ import {
   decodeClassicalTags,
   type ClassicalTags
 } from "../classical/classical-tags.ts";
+import { decodeArtworkHash } from "../library/artwork-src.ts";
 
 // Pure decoders for the audio.playlist shelf.
 //
@@ -127,6 +128,10 @@ export interface PlaylistItem {
    *  Tolerant: missing / non-string / empty string all decode to
    *  null. See `QueueItem.artworkUrl`. */
   artworkUrl: string | null;
+  /** Scan-time content hash of this row's local art (`artwork_hash`),
+   *  64 lowercase hex, or null when the album has none. The tile paints
+   *  it through artworkSrc. */
+  artworkHash: string | null;
   /** Framework cascade primitive (audio.playlist.v1 +
    *  PLUGIN_CONTRACT.md §15): sticker > source-state > null.
    *  See `QueueItem.available` for the full contract. `null` means
@@ -150,6 +155,7 @@ export function decodePlaylistItem(raw: unknown): PlaylistItem | null {
     album: stringOrNull(raw, "album"),
     durationMs: intOrNull(raw, "duration_ms"),
     artworkUrl: stringOrNull(raw, "artwork_url"),
+    artworkHash: decodeArtworkHash(raw["artwork_hash"]),
     available:
       typeof raw["available"] === "boolean" ? (raw["available"] as boolean) : null,
     classical: decodeClassicalTags(raw)

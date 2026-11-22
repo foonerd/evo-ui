@@ -108,6 +108,7 @@ test("LOCK useAudioQueue: the queue verbs are exactly these; Play now and Clear 
     '"queue.move_queue_item"',
     '"queue.play_from_position"',
     '"queue.remove_queue_item"',
+    '"queue.restore_last_queue"',
     '"queue.save_queue_as_playlist"',
     '"queue.skip_to_next_available"'
   ]);

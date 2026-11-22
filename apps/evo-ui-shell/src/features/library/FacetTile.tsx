@@ -15,6 +15,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import {
   CalendarDays,
   Disc3,
+  EyeOff,
   ImageOff,
   RefreshCw,
   Tags,
@@ -29,6 +30,7 @@ import {
 } from "./browse-kebab";
 import { applyArtworkSize, clearArtwork, readArtworkSize } from "./artwork-size";
 import { useArtworkResolvedTick } from "./artwork-resolved";
+import { artworkSrc } from "./artwork-src";
 import type { FacetEntry, FacetKind } from "./library-decoders";
 
 export type QueueMode = BrowseQueueMode;
@@ -50,6 +52,9 @@ interface FacetTileProps {
   onSave?: () => void;
   /** Append this facet value's tracks to an existing playlist. */
   onAddToPlaylist?: () => void;
+  /** Forget this album (album tiles only - the surface hands it to no
+   *  other facet). Painted beside the kebab, never inside it. */
+  onForget?: () => void;
 }
 
 /** THE browse kebab, or nothing. A partial handler set does not
@@ -104,6 +109,7 @@ export function FacetTile(props: FacetTileProps) {
     return (
       <CoverFacetTile
         {...props}
+        onForget={props.onForget}
         cls={cls}
         glyph={<Disc3 size={20} />}
         sub={sub !== "" ? sub : undefined}
@@ -156,7 +162,8 @@ function CoverFacetTile({
   clearTarget,
   onQueue,
   onSave,
-  onAddToPlaylist
+  onAddToPlaylist,
+  onForget
 }: FacetTileProps & {
   cls: string;
   round?: boolean;
@@ -186,11 +193,16 @@ function CoverFacetTile({
   const bustParts: string[] = [];
   if (nonce > 0) bustParts.push(`refresh=1&_r=m${nonce}`);
   if (reloadTick > 0) bustParts.push(`_t=${reloadTick}`);
+  // The scan-time hash (immutable, small art) is painted only while the
+  // tile has been neither refreshed nor re-requested on a landing: after
+  // either, the art may have changed, so the tile goes back to the resolve
+  // address exactly as before. artworkSrc keeps the resolve address for
+  // any size other than small.
   const primary =
     base === null
       ? null
       : bustParts.length === 0
-        ? base
+        ? artworkSrc(entry.artworkHash, base)
         : `${base}${base.includes("?") ? "&" : "?"}${bustParts.join("&")}`;
   // Paint ONLY the validated serve path (the byte endpoint). There is no
   // second paint path: the tile never renders a raw provider URL from the
@@ -295,6 +307,18 @@ function CoverFacetTile({
         </span>
       </button>
       <div className="facet-tile-kebab">
+        {onForget !== undefined ? (
+          <button
+            type="button"
+            className="facet-tile-forget"
+            onClick={onForget}
+            disabled={busy}
+            aria-label={t("library.forgetAlbum")}
+            title={t("library.forgetAlbum")}
+          >
+            <EyeOff size={14} />
+          </button>
+        ) : null}
         <KebabMenu disabled={busy} items={items} />
       </div>
     </div>

@@ -2,6 +2,7 @@ import {
   decodeClassicalTags,
   type ClassicalTags
 } from "../classical/classical-tags.ts";
+import { decodeArtworkHash } from "../library/artwork-src.ts";
 
 // Pure decoders for the audio.favourites shelf.
 //
@@ -59,6 +60,10 @@ export interface FavouriteItem {
    *  The tile falls back to its placeholder - the wire has carried
    *  this all along, the decoder used to drop it. */
   artworkUrl: string | null;
+  /** Scan-time content hash of this row's local art (`artwork_hash`),
+   *  64 lowercase hex, or null when the album has none. The tile paints
+   *  it through artworkSrc. */
+  artworkHash: string | null;
   /** Framework cascade primitive (audio.favourites.v1 +
    *  PLUGIN_CONTRACT.md §15): sticker > source-state > null.
    *  See `QueueItem.available` for the full contract. `null` means
@@ -86,6 +91,7 @@ export function decodeFavouriteItem(raw: unknown): FavouriteItem | null {
       const v = stringOrNull(raw, "artwork_url");
       return v !== null && v.length > 0 ? v : null;
     })(),
+    artworkHash: decodeArtworkHash(raw["artwork_hash"]),
     available:
       typeof raw["available"] === "boolean" ? (raw["available"] as boolean) : null,
     classical: decodeClassicalTags(raw)

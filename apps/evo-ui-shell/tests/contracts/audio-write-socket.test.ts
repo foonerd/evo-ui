@@ -3,11 +3,13 @@
 //
 // Field failure: useAudioOptions and useHardwareAudio each open a
 // private anonymous seed socket and sent every mixer / DSP / DAC write
-// on it. After an in-place pair the step-up sitting is bound to
-// bearer:<id>; a hardware.audio write on the LAN-trust seed socket
-// presented that sitting from another identity, the framework refused
-// it as step_up_required, and the card came up again for a password
-// that could never satisfy. Writes now ride a private socket that
+// on it. The hardware.audio writes then gated at step-up rank: after an
+// in-place pair the sitting was bound to bearer:<id>, a write on the
+// LAN-trust seed socket presented it from another identity, the
+// framework refused it as step_up_required, and the card came up again
+// for a password that could never satisfy. They now gate at
+// write:audio_admin (no household group protects audio_admin), and the
+// write still goes out as the paired identity. Writes ride a private socket that
 // presents the stored bearer (read at every handshake, rotated by the
 // bearer bus, closed on unmount); with no bearer they stay on the seed
 // socket; seed reads and happenings stay on the seed socket either way;
@@ -53,7 +55,8 @@ const OPTIONS_WRITE_VERBS = [
   "options.save_eq_preset",
   "options.recall_eq_preset",
   "options.delete_eq_preset",
-  "options.set_resampling"
+  "options.set_resampling",
+  "options.set_volume_normalization"
 ];
 
 test("with a stored bearer, an Audio write is not sent on the seed socket", () => {
@@ -76,8 +79,20 @@ test("with a stored bearer, an Audio write is not sent on the seed socket", () =
   }
   assert.ok(/await writeRequest\(\s*COMPOSITION_SHELF,\s*"composition\.select_mode"/.test(options),
     "composition.select_mode is a write of this panel and rides the write path");
-  assert.equal((options.match(/await writeRequest\(/g) ?? []).length, 7,
-    "seven write sites: dispatchSetter, set_eq_band, select_mode, save / recall / delete preset, set_resampling");
+  assert.ok(/await writeRequest\(DELIVERY_SHELF, requestType, \{/.test(options),
+    "the five per-output delivery verbs ride the write path through one site (outputVerb)");
+  assert.ok(/const logicalOutputVerb = useCallback\([\s\S]*?await writeRequest\(DELIVERY_SHELF, requestType, \{/.test(options),
+    "the three named-output verbs ride the write path through one site (logicalOutputVerb) on audio.delivery");
+  assert.ok(/const zoneVerb = useCallback\([\s\S]*?await writeRequest\(ZONES_SHELF, requestType, \{/.test(options),
+    "the three zone verbs and the two zone EQ verbs ride the write path through one site (zoneVerb) on audio.zones");
+  assert.ok(/const sceneVerb = useCallback\([\s\S]*?await writeRequest\(ZONES_SHELF, requestType, \{/.test(options),
+    "the three scene verbs ride the write path through one site (sceneVerb) on audio.zones");
+  assert.ok(/const setSleepTimer = useCallback\([\s\S]*?await writeRequest\(OPTIONS_SHELF, "options\.set_sleep_timer"/.test(options),
+    "the sleep timer rides the write path through one site (setSleepTimer) on audio.options, not through dispatchSetter");
+  assert.ok(/const alarmVerb = useCallback\([\s\S]*?await writeRequest\(ALARM_SHELF, requestType, \{/.test(options),
+    "alarm.set and alarm.clear ride the write path through one site (alarmVerb) on audio.alarm, not through dispatchSetter");
+  assert.equal((options.match(/await writeRequest\(/g) ?? []).length, 14,
+    "fourteen write sites: dispatchSetter, set_eq_band, select_mode, save / recall / delete preset, set_resampling, set_volume_normalization, outputVerb (the five delivery output verbs), logicalOutputVerb (the three named-output verbs, audio.delivery), zoneVerb (the three zone verbs and the two zone EQ verbs, audio.zones), sceneVerb (the three scene verbs, audio.zones), setSleepTimer (options.set_sleep_timer, audio.options), alarmVerb (alarm.set and alarm.clear, audio.alarm)");
   assert.ok(!/pluginRequest\(\s*transport,\s*OPTIONS_SHELF,\s*(requestType|"options\.(set_|save_|recall_|delete_))/.test(options),
     "no options write is sent by name on the seed socket");
   assert.ok(!/pluginRequest\(\s*transport,\s*COMPOSITION_SHELF/.test(options), "no composition write on the seed socket");
@@ -106,7 +121,7 @@ test("with a stored bearer, an Audio write is not sent on the seed socket", () =
       "hardware.audio.modder.remove_overlay",
       "hardware.audio.select_dac"
     ],
-    "exactly the plugin manifest's step_up:audio_admin set"
+    "exactly the plugin manifest's write:audio_admin set"
   );
 });
 
@@ -139,8 +154,8 @@ test("seed reads and happenings stay on the seed socket", () => {
     "verify_install is a read and stays on the seed socket");
   assert.ok(!/writeTransport\(\)|writeRequest\(/.test(listPresets) && !/writeTransport\(\)|writeRequest\(/.test(verify), "reads never use the write path");
   // The re-read after a write is a read: seed socket.
-  assert.equal((options.match(/const seed = transportRef\.current;\s*if \(seed !== null\) await refreshSettings\(seed\);/g) ?? []).length, 2,
-    "dispatchSetter and set_resampling re-read on the seed socket");
+  assert.equal((options.match(/const seed = transportRef\.current;\s*if \(seed !== null\) await refreshSettings\(seed\);/g) ?? []).length, 4,
+    "dispatchSetter, set_resampling, select_mode, and set_volume_normalization re-read on the seed socket");
   assert.ok(!/refreshSettings\(tx\)|refreshSettings\(write/.test(options), "no re-read on the write socket");
 
   // hardware reads.

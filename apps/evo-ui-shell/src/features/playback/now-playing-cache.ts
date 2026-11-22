@@ -35,6 +35,7 @@ export function writeLastNowPlaying(state: NowPlaying): void {
       muted: state.muted,
       repeat: state.repeat,
       shuffle: state.shuffle,
+      shuffle_mode: state.shuffleMode,
       single: state.single,
       consume: state.consume,
       track:

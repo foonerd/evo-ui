@@ -4,11 +4,13 @@
 // Field failure: useSystemPower's Flight write already opened a private
 // socket presenting the stored bearer, but reboot_device /
 // power_off_device went out through dispatchVerb on the hook's
-// anonymous seed socket. Both verbs are step_up:system_admin. After an
-// in-place pair the sitting is bound to bearer:<id>; a power verb on
-// the LAN-trust seed socket presented that sitting from another
-// identity, the framework refused it (WrongPeer -> step_up_required),
-// and the card came up again for a password that could never satisfy.
+// anonymous seed socket. Both verbs then gated at step-up rank; they
+// now gate at write:system_admin with the household policy as the door
+// on top. After an in-place pair the sitting is bound to bearer:<id>; a
+// power verb on the LAN-trust seed socket presented that sitting from
+// another identity and was refused (then step_up_required, now
+// household_policy_locked while the household protects system_admin),
+// so the sitting could never satisfy it.
 // The two verbs now ride a lazy private socket presenting the stored
 // bearer (read at every handshake, rotated by the bearer bus, closed
 // on unmount, fail closed with no WebSocket); with no bearer they stay

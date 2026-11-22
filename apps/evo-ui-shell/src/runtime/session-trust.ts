@@ -179,7 +179,8 @@ export async function setKioskPassword(
 }
 
 /** Verify the operator password for a step-up gate. Returns the
- *  short-lived step-up token - hold it in MEMORY only.
+ *  short-lived step-up token and its expires_at_ms - hold them in
+ *  MEMORY only.
  *
  *  USERNAME CONTRACT (ruled 2026-07-19): the operator credential IS
  *  the OS runtime user's password, and only the framework knows that
@@ -196,7 +197,7 @@ export async function setKioskPassword(
 export async function stepUpVerify(
   password: string,
   bearerToken: string | undefined
-): Promise<TrustOpResult<string>> {
+): Promise<TrustOpResult<StepUpIssued>> {
   const payload = {
     secret_b64: b64Utf8(password),
     nonce: makeNonce()
@@ -210,12 +211,33 @@ export async function stepUpVerify(
     );
   }
   if (!r.ok) return r;
-  const rec = asRecord(r.value);
-  const token = rec?.["token"];
-  if (typeof token !== "string" || token.length === 0) {
+  const issued = decodeStepUpIssued(r.value);
+  if (issued === null) {
     return { ok: false, refusal: "unrecognised", message: "step_up_auth_verify response" };
   }
-  return { ok: true, value: token };
+  return { ok: true, value: issued };
+}
+
+/** What step_up_auth_verify issued: the token and the wall-clock
+ *  millisecond at which the sitting ends. */
+export interface StepUpIssued {
+  token: string;
+  /** Null when the answer carries no expires_at_ms - no expiry is
+   *  invented; the wire refusal path decides. */
+  expiresAtMs: number | null;
+}
+
+/** Decode the step_up_auth_verify success value - token required,
+ *  expires_at_ms kept when the answer carries it. */
+export function decodeStepUpIssued(raw: unknown): StepUpIssued | null {
+  const rec = asRecord(raw);
+  const token = rec?.["token"];
+  if (typeof token !== "string" || token.length === 0) return null;
+  const expires = rec?.["expires_at_ms"];
+  return {
+    token,
+    expiresAtMs: typeof expires === "number" && Number.isFinite(expires) ? expires : null
+  };
 }
 
 /** Fresh 16-byte random nonce, base64url unpadded (30s replay

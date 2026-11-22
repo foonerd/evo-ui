@@ -71,6 +71,20 @@ export const DEFAULT_VOICE_PATTERNS: readonly VoicePattern[] = Object.freeze<
   },
 ]);
 
+/** The verb an utterance maps to under a grammar, or null when no
+ *  pattern matches. The first matching pattern wins, in order. */
+export function matchUtterance(
+  text: string,
+  patterns: readonly VoicePattern[] = DEFAULT_VOICE_PATTERNS,
+): Verb | null {
+  const t = text.trim().toLowerCase();
+  for (const pattern of patterns) {
+    const m = t.match(pattern.pattern);
+    if (m !== null) return pattern.toVerb(m);
+  }
+  return null;
+}
+
 /** Status emitted to consumers via the start() callback. */
 export type VoiceStatus =
   | { readonly kind: "unsupported" }
@@ -141,14 +155,11 @@ export function startVoiceInput(
     if (alt === undefined) return;
     const text = alt.transcript.trim().toLowerCase();
     onStatus({ kind: "transcribed", text });
-    for (const pattern of patterns) {
-      const m = text.match(pattern.pattern);
-      if (m !== null) {
-        const verb = pattern.toVerb(m);
-        onStatus({ kind: "dispatched", verb });
-        void dispatcher.dispatch(verb, "voice");
-        return;
-      }
+    const verb = matchUtterance(text, patterns);
+    if (verb !== null) {
+      onStatus({ kind: "dispatched", verb });
+      void dispatcher.dispatch(verb, "voice");
+      return;
     }
     onStatus({ kind: "no_match", text });
   };

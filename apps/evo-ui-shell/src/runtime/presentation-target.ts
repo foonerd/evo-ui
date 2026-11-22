@@ -657,9 +657,15 @@ export function buildPresentationPlan(input: PresentationInput): PresentationPla
     deviceKindSetting: deviceKindPlan.setting,
     deviceKind: deviceKindPlan.resolved,
     deviceKindSource: deviceKindPlan.source,
+    // Home style is an operator per-target choice like the dials: the
+    // designer's Apply writes it under the DECLARED native_target, so the
+    // glass resolves it off that same key. Off the measured key a panel
+    // whose CSS viewport drifts from its declared geometry (DPR, zoom,
+    // rotation) never found the applied Full layout and stayed on the
+    // compass the size heuristic gives it.
     interaction: interactionWithHomeMode(
       interactionFor(sizeClass, deviceKindPlan.resolved, foldTier),
-      resolveHomeMode(targetKey, input.profileSettings)
+      resolveHomeMode(dialKey, input.profileSettings)
     ),
     smallLanding: resolveSmallLanding(targetKey, input.profileSettings),
     compass: resolveCompass(targetKey, input.profileSettings),

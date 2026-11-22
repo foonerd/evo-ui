@@ -8,7 +8,8 @@
 //
 // The token is held in memory only (never persisted), reused across the
 // operator's sitting, and cleared by the transport when a retry shows it
-// has expired.
+// has expired. The sitting store keeps the expires_at_ms verify answered:
+// past it the token is no sitting, and every subscriber is told.
 
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { JSX } from "preact";
@@ -22,6 +23,7 @@ import { storedBearer } from "../../runtime/bearer";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 import { createStepUpAcquireLane } from "./step-up-acquire-lane";
+import { createStepUpSittingStore } from "./step-up-sitting-store";
 
 export function StepUpHost(): JSX.Element | null {
   useLocale();
@@ -29,21 +31,15 @@ export function StepUpHost(): JSX.Element | null {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const tokenRef = useRef<string | null>(null);
   const laneRef = useRef(createStepUpAcquireLane());
-  const listenersRef = useRef(new Set<(token: string | null) => void>());
+  const sittingRef = useRef(createStepUpSittingStore());
 
   useEffect(() => {
-    const notify = (token: string | null): void => {
-      listenersRef.current.forEach((listener) => listener(token));
-    };
     const lane = laneRef.current;
+    const sitting = sittingRef.current;
     const bridge: StepUpBridge = {
-      getToken: () => tokenRef.current,
-      setToken: (token) => {
-        tokenRef.current = token;
-        notify(token);
-      },
+      getToken: sitting.getToken,
+      setToken: sitting.setToken,
       acquire: () =>
         new Promise<string | null>((resolve) => {
           if (lane.enqueue(resolve)) {
@@ -52,17 +48,12 @@ export function StepUpHost(): JSX.Element | null {
             setOpen(true);
           }
         }),
-      subscribe: (listener) => {
-        listenersRef.current.add(listener);
-        listener(tokenRef.current);
-        return () => {
-          listenersRef.current.delete(listener);
-        };
-      }
+      subscribe: sitting.subscribe
     };
     setStepUpBridge(bridge);
     return () => {
       setStepUpBridge(null);
+      sitting.dispose();
       // Resolve any card left open on unmount as a cancel so no caller
       // hangs on the parked promise.
       if (lane.open) lane.settle(null);
@@ -108,10 +99,10 @@ export function StepUpHost(): JSX.Element | null {
       }
       return;
     }
-    tokenRef.current = verify.value;
+    sittingRef.current.issue(verify.value.token, verify.value.expiresAtMs);
     setBusy(false);
     setOpen(false);
-    laneRef.current.settle(verify.value);
+    laneRef.current.settle(verify.value.token);
   };
 
   if (!open) return null;

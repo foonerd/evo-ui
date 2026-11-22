@@ -32,6 +32,7 @@ import {
 import { usePlayback } from "./usePlayback";
 import { interpolateElapsedMs } from "./now-playing-decoders";
 import { elapsedAnchorOf } from "./playback-clock";
+import { nextShuffleMode, paintedShuffleMode } from "./shuffle-mode";
 import { useFavourites } from "../favourites/useFavourites";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
@@ -75,7 +76,7 @@ export function StageSurface(props: StageSurfaceProps) {
     connection,
     nowPlaying, nowPlayingObservedAtMs, streamFormat,
     play, pause, resume, next, previous, seek,
-    setVolume, setMute, setRepeat, setShuffle, setSingle,
+    setVolume, setMute, setRepeat, setShuffleMode, setSingle,
     refreshNowPlaying,
   } = usePlayback();
   const [busy, setBusy] = useState(false);
@@ -103,7 +104,27 @@ export function StageSurface(props: StageSurfaceProps) {
   const volume = pendingVolume ?? nowPlaying?.volume ?? 0;
   const durationMs = nowPlaying?.durationMs ?? null;
   const elapsedMs = nowPlaying?.elapsedMs ?? null;
-  const shuffleOn = nowPlaying?.shuffle ?? false;
+  // Shuffle is a mode the player reports; MPD's random flag alone can
+  // only prove track shuffle. null = not reported: nothing is painted on.
+  const shuffleMode = paintedShuffleMode(nowPlaying);
+  const shuffleOn =
+    shuffleMode === "tracks" || shuffleMode === "albums" || shuffleMode === "similar";
+  const shuffleBadge =
+    shuffleMode === "albums"
+      ? t("stage.shuffleAlbumsBadge")
+      : shuffleMode === "similar"
+        ? t("stage.shuffleSimilarBadge")
+        : null;
+  const shuffleLabel =
+    shuffleMode === "albums"
+      ? t("stage.shuffleAlbums")
+      : shuffleMode === "similar"
+        ? t("stage.shuffleSimilar")
+      : shuffleMode === "tracks"
+        ? t("stage.shuffleTracks")
+        : shuffleMode === "off"
+          ? t("stage.shuffleOff")
+          : t("stage.shuffle");
   const repeatOn = nowPlaying?.repeat ?? false;
   const singleOn = nowPlaying?.single ?? false;
 
@@ -347,8 +368,10 @@ export function StageSurface(props: StageSurfaceProps) {
         return (
           <button key={key} type="button"
             class={"playback-transport-icon st-btn st-toggle" + (shuffleOn ? " st-on" : "") + scaleCls(b)}
-            disabled={busy} aria-label={t("stage.shuffle")} aria-pressed={shuffleOn}
-            onClick={() => void runVerb(() => setShuffle(!shuffleOn))}><Shuffle /></button>
+            disabled={busy} aria-label={shuffleLabel} title={shuffleLabel} aria-pressed={shuffleOn}
+            data-shuffle-mode={shuffleMode ?? "unreported"}
+            onClick={() => void runVerb(() => setShuffleMode(nextShuffleMode(shuffleMode)))}><Shuffle />
+            {shuffleBadge !== null ? <span class="playback-transport-badge">{shuffleBadge}</span> : null}</button>
         );
       case "repeatAll":
         return (

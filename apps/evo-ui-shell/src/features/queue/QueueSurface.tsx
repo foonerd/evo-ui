@@ -50,6 +50,7 @@ import {
 } from "../../components/dialogs";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
+import { artworkSrc } from "../library/artwork-src";
 import {
   collectionChromeMode,
   readCollectionLoadFlag
@@ -103,6 +104,7 @@ export function QueueSurface({
     removeItem,
     moveItem,
     clearQueue,
+    restoreLastQueue,
     loadPlaylist,
     appendPlaylist,
     saveAsPlaylist,
@@ -220,6 +222,12 @@ export function QueueSurface({
   const onClearQueue = useCallback(() => {
     setDialog({ kind: "clear" });
   }, []);
+
+  // One write: the player restores, cues the row that was playing and
+  // pauses. Nothing is sent after it - the operator presses play.
+  const onRestoreLastQueue = useCallback(() => {
+    void runAction(t("queue.restoreLast"), restoreLastQueue);
+  }, [runAction, restoreLastQueue]);
 
   const onSaveAsPlaylist = useCallback(() => {
     setDialog({ kind: "save-as" });
@@ -447,6 +455,15 @@ export function QueueSurface({
         <button
           type="button"
           className="queue-action-button"
+          onClick={onRestoreLastQueue}
+          disabled={busy}
+          title={t("queue.restoreLastHelp")}
+        >
+          {t("queue.restoreLast")}
+        </button>
+        <button
+          type="button"
+          className="queue-action-button"
           onClick={onAppendPlaylist}
           disabled={busy}
         >
@@ -504,7 +521,7 @@ export function QueueSurface({
                 title={item.title ?? item.uri}
                 artist={item.artist}
                 album={item.album}
-                artworkUrl={item.artworkUrl}
+                artworkUrl={artworkSrc(item.artworkHash, item.artworkUrl)}
                 placeholderIcon={<QueueIcon />}
                 classical={showClassicalStrip ? item.classical : null}
                 durationMs={item.durationMs}
@@ -533,7 +550,7 @@ export function QueueSurface({
                 title={item.title ?? item.uri}
                 artist={item.artist}
                 album={item.album}
-                artworkUrl={item.artworkUrl}
+                artworkUrl={artworkSrc(item.artworkHash, item.artworkUrl)}
                 placeholderIcon={<QueueIcon />}
                 classical={showClassicalStrip ? item.classical : null}
                 durationMs={item.durationMs}

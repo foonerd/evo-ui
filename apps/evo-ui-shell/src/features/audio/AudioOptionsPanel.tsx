@@ -55,6 +55,14 @@ import { DacOverlayManager } from "./DacOverlayManager";
 import { StreamFormatReadout } from "./StreamFormatReadout";
 import { EqPanel } from "./EqPanel";
 import { EvoSelect } from "../../components/EvoSelect";
+import { OutputControlRow } from "./OutputControlRow";
+import { LogicalOutputList } from "./LogicalOutputList";
+import { ZoneList } from "./ZoneList";
+import { SceneList } from "./SceneList";
+import { SLEEP_TIMER_CANCEL, parseWholeNumber } from "./sleep-timer";
+import { ALARM_WEEKDAYS, alarmSetPayload, toggleWeekday, type Alarm } from "./alarm";
+import type { OutputState } from "./output-verbs";
+import type { OutputVerbResult } from "./useAudioOptions";
 import {
   visibleOutputs,
   findSelectedOutput,
@@ -67,6 +75,7 @@ import {
   TEST_TONE_DURATION_MIN_MS,
   TEST_TONE_DURATION_MAX_MS,
   OUTPUT_CLASS_ORDER,
+  VOLUME_NORMALIZATION_MODES,
   type DspControl,
   type TestToneChannel,
   type MixerType,
@@ -176,11 +185,33 @@ export function AudioOptionsPanel({
     setVolumeNormalization,
     setExclusiveMode,
     setCrossfadeSeconds,
+    setSleepTimer,
+    setAlarm,
+    clearAlarm,
     setGapless,
     setEqEngaged,
     setEqBand,
     selectEqMode,
-    eqModeActive,
+    eqMode,
+    enableOutput,
+    disableOutput,
+    playOutput,
+    pauseOutput,
+    setOutputVolume,
+    logicalOutputs,
+    addLogicalOutput,
+    updateLogicalOutput,
+    removeLogicalOutput,
+    zones,
+    addZone,
+    updateZone,
+    removeZone,
+    setZoneEqEngaged,
+    setZoneEqBand,
+    scenes,
+    saveScene,
+    recallScene,
+    removeScene,
     listEqPresets,
     saveEqPreset,
     recallEqPreset,
@@ -189,6 +220,42 @@ export function AudioOptionsPanel({
     verifyInstall,
     emitTestTone
   } = useAudioOptions();
+
+  // Per-output state and refusals (G1), keyed by hw:N,M. An answer
+  // paints the output it names; a refusal lands on the row that asked.
+  // Nothing here touches the picker or the global volume.
+  const [outputStates, setOutputStates] = useState<Record<string, OutputState>>({});
+  const [outputErrors, setOutputErrors] = useState<Record<string, string>>({});
+  const [outputBusy, setOutputBusy] = useState<string | null>(null);
+  const runOutputVerb = useCallback(async (
+    outputId: string,
+    verb: () => Promise<OutputVerbResult>
+  ): Promise<void> => {
+    setOutputBusy(outputId);
+    setOutputErrors((cur) => {
+      const next = { ...cur };
+      delete next[outputId];
+      return next;
+    });
+    try {
+      const r = await verb();
+      if (r.ok) {
+        setOutputStates((cur) => ({ ...cur, [r.value.outputId]: r.value }));
+      } else {
+        setOutputErrors((cur) => ({ ...cur, [outputId]: r.message }));
+      }
+    } finally {
+      setOutputBusy(null);
+    }
+  }, []);
+  const onOutputEnable = useCallback((id: string) => void runOutputVerb(id, () => enableOutput(id)), [runOutputVerb, enableOutput]);
+  const onOutputDisable = useCallback((id: string) => void runOutputVerb(id, () => disableOutput(id)), [runOutputVerb, disableOutput]);
+  const onOutputPlay = useCallback((id: string) => void runOutputVerb(id, () => playOutput(id)), [runOutputVerb, playOutput]);
+  const onOutputPause = useCallback((id: string) => void runOutputVerb(id, () => pauseOutput(id)), [runOutputVerb, pauseOutput]);
+  const onOutputVolume = useCallback(
+    (id: string, volume: number) => void runOutputVerb(id, () => setOutputVolume(id, volume)),
+    [runOutputVerb, setOutputVolume]
+  );
 
   const hw = useHardwareAudio();
   const power = useSystemPower();
@@ -427,11 +494,12 @@ export function AudioOptionsPanel({
     if (!r.ok) setSetterError(r.message);
   };
 
-  const onVolumeNormalizationChange = async (
-    value: boolean
-  ): Promise<void> => {
+  // ReplayGain is a mode: disabled, track or album. One write per pick.
+  const onVolumeNormalizationChange = async (raw: string): Promise<void> => {
+    const mode = VOLUME_NORMALIZATION_MODES.find((m) => m === raw);
+    if (mode === undefined) return;
     setSetterError(null);
-    const r = await setVolumeNormalization(value);
+    const r = await setVolumeNormalization(mode);
     if (!r.ok) setSetterError(r.message);
   };
 
@@ -445,6 +513,69 @@ export function AudioOptionsPanel({
     setSetterError(null);
     const r = await setCrossfadeSeconds(clampCrossfadeSeconds(raw));
     if (!r.ok) setSetterError(r.message);
+  };
+
+  // Sleep timer (H2): two drafts the operator types; nothing is sent
+  // until Set timer or Cancel timer. The timer is kept by the player and
+  // never read back, so nothing here paints an armed timer.
+  const [sleepSecondsDraft, setSleepSecondsDraft] = useState<string>("");
+  const [sleepFadeDraft, setSleepFadeDraft] = useState<string>("");
+  const [sleepBusy, setSleepBusy] = useState<boolean>(false);
+  const [sleepError, setSleepError] = useState<string | null>(null);
+  const onArmSleepTimer = async (): Promise<void> => {
+    const seconds = parseWholeNumber(sleepSecondsDraft);
+    const fadeMs = parseWholeNumber(sleepFadeDraft);
+    if (seconds === null || fadeMs === null) return;
+    setSleepBusy(true);
+    setSleepError(null);
+    const r = await setSleepTimer(seconds, fadeMs);
+    setSleepBusy(false);
+    if (!r.ok) setSleepError(r.message);
+  };
+  const onCancelSleepTimer = async (): Promise<void> => {
+    setSleepBusy(true);
+    setSleepError(null);
+    const r = await setSleepTimer(SLEEP_TIMER_CANCEL.seconds, SLEEP_TIMER_CANCEL.fade_ms);
+    setSleepBusy(false);
+    if (!r.ok) setSleepError(r.message);
+  };
+
+  // Alarm: weekdays in the order the operator chose them, a local time
+  // and a playlist name, held as drafts. Nothing is sent until Set alarm
+  // or Clear alarm. There is no read, so on connect no alarm is shown; the
+  // alarm shown is the one a set answered, and a clear answered ok takes
+  // it away. A refused set leaves the alarm shown as it was.
+  const [alarmDays, setAlarmDays] = useState<string[]>([]);
+  const [alarmTimeDraft, setAlarmTimeDraft] = useState<string>("");
+  const [alarmPlaylistDraft, setAlarmPlaylistDraft] = useState<string>("");
+  const [alarmShown, setAlarmShown] = useState<Alarm | null>(null);
+  const [alarmBusy, setAlarmBusy] = useState<boolean>(false);
+  const [alarmError, setAlarmError] = useState<string | null>(null);
+  const onSetAlarm = async (): Promise<void> => {
+    if (locked) return;
+    const payload = alarmSetPayload(alarmDays, alarmTimeDraft, alarmPlaylistDraft);
+    if (payload === null) return;
+    setAlarmBusy(true);
+    setAlarmError(null);
+    const r = await setAlarm(payload);
+    setAlarmBusy(false);
+    if (r.ok) {
+      setAlarmShown(r.value);
+    } else {
+      setAlarmError(r.message);
+    }
+  };
+  const onClearAlarm = async (): Promise<void> => {
+    if (locked) return;
+    setAlarmBusy(true);
+    setAlarmError(null);
+    const r = await clearAlarm();
+    setAlarmBusy(false);
+    if (r.ok) {
+      setAlarmShown(null);
+    } else {
+      setAlarmError(r.message);
+    }
   };
 
   const onGaplessChange = async (value: boolean): Promise<void> => {
@@ -700,6 +831,52 @@ export function AudioOptionsPanel({
               onChange={(v) => void onPickDevice(v)}
             />
           </label>
+          <p className="audio-dsp-title">{t("audioopt.outputRows")}</p>
+          <ul className="audio-output-rows">
+            {outputsInClass.map((o) => (
+              <OutputControlRow
+                key={o.alsaId}
+                output={o}
+                state={outputStates[o.alsaId] ?? null}
+                error={outputErrors[o.alsaId] ?? null}
+                busy={locked || outputBusy !== null}
+                onEnable={onOutputEnable}
+                onDisable={onOutputDisable}
+                onPlay={onOutputPlay}
+                onPause={onOutputPause}
+                onVolume={onOutputVolume}
+              />
+            ))}
+          </ul>
+          {/* end audio-output-rows */}
+          <LogicalOutputList
+            rows={logicalOutputs}
+            outputs={outputsInClass}
+            disabled={locked}
+            onAdd={addLogicalOutput}
+            onUpdate={updateLogicalOutput}
+            onRemove={removeLogicalOutput}
+          />
+          {/* end audio-named-outputs */}
+          <ZoneList
+            rows={zones}
+            logicalOutputs={logicalOutputs}
+            disabled={locked}
+            onAdd={addZone}
+            onUpdate={updateZone}
+            onRemove={removeZone}
+            onSetEqEngaged={setZoneEqEngaged}
+            onSetEqBand={setZoneEqBand}
+          />
+          {/* end audio-zones */}
+          <SceneList
+            rows={scenes}
+            disabled={locked}
+            onSave={saveScene}
+            onRecall={recallScene}
+            onRemove={removeScene}
+          />
+          {/* end audio-scenes */}
         </>
       )}
       <p className="audio-stage-note">{t("audioopt.outputNote")}</p>
@@ -1040,17 +1217,20 @@ export function AudioOptionsPanel({
 
       <label className="settings-label" htmlFor="audio-volume-normalization">
         <span>{t("audioopt.normalization")}</span>
-        <input
-          id="audio-volume-normalization"
-          type="checkbox"
-          className="audio-toggle"
-          checked={settings.volumeNormalization}
+        <EvoSelect
+          ariaLabel={t("audioopt.normalization")}
+          value={settings.volumeNormalization}
           disabled={locked}
-          onChange={(ev) =>
-            void onVolumeNormalizationChange(
-              (ev.currentTarget as HTMLInputElement).checked
-            )
-          }
+          options={VOLUME_NORMALIZATION_MODES.map((m) => ({
+            value: m,
+            label:
+              m === "track"
+                ? t("audioopt.normalizationTrack")
+                : m === "album"
+                  ? t("audioopt.normalizationAlbum")
+                  : t("audioopt.normalizationDisabled")
+          }))}
+          onChange={(v) => void onVolumeNormalizationChange(v)}
         />
       </label>
 
@@ -1071,6 +1251,153 @@ export function AudioOptionsPanel({
           }
         />
       </label>
+
+      <div className="audio-sleep-timer">
+        <p className="audio-dsp-title">{t("audioopt.sleepTimer")}</p>
+        <div className="audio-eq-preset-line">
+          <label className="audio-eq-preset-field" htmlFor="audio-sleep-seconds">
+            <span>{t("audioopt.sleepSeconds")}</span>
+            <input
+              id="audio-sleep-seconds"
+              type="number"
+              min={0}
+              step={1}
+              inputMode="numeric"
+              value={sleepSecondsDraft}
+              disabled={locked || sleepBusy}
+              onInput={(ev) => setSleepSecondsDraft((ev.currentTarget as HTMLInputElement).value)}
+            />
+          </label>
+          <label className="audio-eq-preset-field" htmlFor="audio-sleep-fade">
+            <span>{t("audioopt.sleepFadeMs")}</span>
+            <input
+              id="audio-sleep-fade"
+              type="number"
+              min={0}
+              step={1}
+              inputMode="numeric"
+              value={sleepFadeDraft}
+              disabled={locked || sleepBusy}
+              onInput={(ev) => setSleepFadeDraft((ev.currentTarget as HTMLInputElement).value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="audio-eq-preset-btn"
+            disabled={
+              locked ||
+              sleepBusy ||
+              parseWholeNumber(sleepSecondsDraft) === null ||
+              parseWholeNumber(sleepFadeDraft) === null
+            }
+            onClick={() => void onArmSleepTimer()}
+          >
+            {t("audioopt.sleepArm")}
+          </button>
+          <button
+            type="button"
+            className="audio-eq-preset-btn"
+            disabled={locked || sleepBusy}
+            onClick={() => void onCancelSleepTimer()}
+          >
+            {t("audioopt.sleepCancel")}
+          </button>
+        </div>
+        <p className="audio-stage-note">{t("audioopt.sleepNote")}</p>
+        {sleepError !== null ? (
+          <div className="audio-options-setter-error" role="alert">
+            <span>{sleepError}</span>
+          </div>
+        ) : null}
+      </div>
+      {/* end audio-sleep-timer */}
+
+      <div className="audio-alarm">
+        <p className="audio-dsp-title">{t("audioopt.alarm")}</p>
+        <p className="audio-stage-note">
+          {alarmShown === null
+            ? t("audioopt.alarmNone")
+            : t("audioopt.alarmShown", {
+                days: alarmShown.weekdays
+                  .map((d) =>
+                    (ALARM_WEEKDAYS as ReadonlyArray<string>).includes(d)
+                      ? t(`audioopt.alarmDay.${d}` as never)
+                      : d
+                  )
+                  .join(", "),
+                time: alarmShown.time,
+                name: alarmShown.playlistName
+              })}
+        </p>
+        <span className="audio-zone-choices" role="group" aria-label={t("audioopt.alarmDays")}>
+          {ALARM_WEEKDAYS.map((day) => (
+            <button
+              key={day}
+              type="button"
+              className={
+                alarmDays.includes(day)
+                  ? "library-mode-btn library-mode-active"
+                  : "library-mode-btn"
+              }
+              aria-pressed={alarmDays.includes(day)}
+              disabled={locked || alarmBusy}
+              onClick={() => setAlarmDays((cur) => toggleWeekday(cur, day))}
+            >
+              {t(`audioopt.alarmDay.${day}` as never)}
+            </button>
+          ))}
+        </span>
+        <div className="audio-eq-preset-line">
+          <label className="audio-eq-preset-field" htmlFor="audio-alarm-time">
+            <span>{t("audioopt.alarmTime")}</span>
+            <input
+              id="audio-alarm-time"
+              type="time"
+              step={60}
+              value={alarmTimeDraft}
+              disabled={locked || alarmBusy}
+              onInput={(ev) => setAlarmTimeDraft((ev.currentTarget as HTMLInputElement).value)}
+            />
+          </label>
+          <label className="audio-eq-preset-field" htmlFor="audio-alarm-playlist">
+            <span>{t("audioopt.alarmPlaylist")}</span>
+            <input
+              id="audio-alarm-playlist"
+              type="text"
+              value={alarmPlaylistDraft}
+              placeholder={t("audioopt.alarmPlaylistPlaceholder")}
+              disabled={locked || alarmBusy}
+              onInput={(ev) => setAlarmPlaylistDraft((ev.currentTarget as HTMLInputElement).value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="audio-eq-preset-btn"
+            disabled={
+              locked ||
+              alarmBusy ||
+              alarmSetPayload(alarmDays, alarmTimeDraft, alarmPlaylistDraft) === null
+            }
+            onClick={() => void onSetAlarm()}
+          >
+            {t("audioopt.alarmSet")}
+          </button>
+          <button
+            type="button"
+            className="audio-eq-preset-btn"
+            disabled={locked || alarmBusy}
+            onClick={() => void onClearAlarm()}
+          >
+            {t("audioopt.alarmClear")}
+          </button>
+        </div>
+        {alarmError !== null ? (
+          <div className="audio-options-setter-error" role="alert">
+            <span>{alarmError}</span>
+          </div>
+        ) : null}
+      </div>
+      {/* end audio-alarm */}
 
       <label className="settings-label" htmlFor="audio-gapless">
         <span>{t("audioopt.gapless")}</span>
@@ -1095,7 +1422,7 @@ export function AudioOptionsPanel({
         <EqPanel
           bands={settings.eqBands}
           engaged={settings.eqEngaged}
-          modeActive={eqModeActive}
+          eqMode={eqMode}
           locked={locked}
           setBand={setEqBand}
           setEngaged={setEqEngaged}

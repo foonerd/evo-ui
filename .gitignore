@@ -91,3 +91,6 @@ CLAUDE.local.md
 # the generator on their own to obtain typed bindings.
 /sdks/
 apps/evo-ui-shell/package-lock.json
+
+# Promote observability (eng-local; never ship)
+dist/release/promote-reports/

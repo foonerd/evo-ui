@@ -4,7 +4,8 @@
 // (PivotHome's device overlay).
 //
 // The power verbs (reboot_device / power_off_device on the
-// system.power shelf) are real and step_up:system_admin gated. This
+// system.power shelf) are real and gate at write:system_admin, with the
+// household policy as the door on top while it protects system_admin. This
 // module owns the confirm -> dispatch -> outcome flow and the
 // post-reboot health-poll reconnect, so both call sites share one
 // correct implementation rather than diverging copies. Each call
@@ -17,6 +18,10 @@ import { AttentionOverlay } from "../../components/AttentionLayer";
 import { StepUpConfirm } from "../../components/StepUpConfirm";
 import { Plane, Power, RotateCcw } from "lucide-preact";
 import { useSystemPower } from "./useSystemPower";
+import { flightNeedsSitting } from "./flight-household";
+import { isHouseholdLocked } from "../../runtime/authz-classify";
+import { useHouseholdModal } from "../household/HouseholdModalHost";
+import { useStepUpSitting } from "../household/useStepUpSitting";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 
@@ -58,6 +63,11 @@ export interface SystemPowerConfirmState {
  *  so each component that uses this hook holds a single power probe. */
 export function useSystemPowerConfirm(): SystemPowerConfirmState {
   const power = useSystemPower();
+  // Flight and the household: the one household door on a lock, and the
+  // one existing card before Flight when the household protects the
+  // network group and no sitting is cached.
+  const household = useHouseholdModal();
+  const sitting = useStepUpSitting();
   const [confirm, setConfirm] = useState<SystemPowerConfirmKind | null>(null);
   const [busy, setBusy] = useState(false);
   const [accepted, setAccepted] = useState(false);
@@ -106,10 +116,31 @@ export function useSystemPowerConfirm(): SystemPowerConfirmState {
     if (confirm === "flight_on" || confirm === "flight_off") {
       // Flight mode is a reversible radio toggle - no host teardown,
       // no reconnect poll. Apply, then dismiss on success.
+      // The household protects the network group and no sitting is
+      // cached: ask the one existing card first. Cancel sends nothing
+      // and paints nothing; the radios stay as they are.
+      if (
+        flightNeedsSitting(household?.household.snapshot ?? null, sitting.live) &&
+        !(await sitting.request())
+      ) {
+        setBusy(false);
+        return;
+      }
       const res = await power.setFlight(confirm === "flight_on");
       setBusy(false);
       if (res.ok) {
         closeConfirm();
+      } else if (isHouseholdLocked(res)) {
+        // Locked, not failed: the door that can resolve it - never the
+        // bare refusal. The door sits on a lower band than this confirm,
+        // so the confirm steps aside for it; with no door host the
+        // household line stays on the confirm.
+        if (household !== null) {
+          closeConfirm();
+          household.open();
+        } else {
+          setError(t("household.locked.body"));
+        }
       } else {
         setError(res.message ?? t("power.flightFailed"));
       }

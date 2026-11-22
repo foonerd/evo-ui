@@ -6,16 +6,28 @@
 // The raw text is logged to the console for debugging (never on-screen).
 
 import { t } from "../../runtime/i18n.ts";
-import { isShareBusyReason } from "./share-busy.ts";
+import { SHARE_BUSY_SUBCLASS, isShareBusyReason } from "./share-busy.ts";
 import { isSharePasswordMissing } from "./share-password-needed.ts";
 
-/** The Sources sentence for a verb refusal. One case is Sources' own:
- *  a mount refused because the share's vault has no password is not
- *  a device fault - the operator types the password on Edit, then
- *  presses Connect - and the shared mapper's sentence for that string
- *  belongs to File-sharing user-add. Everything else defers to
- *  friendlyVerbError. Sources paints through this and nothing else. */
-export function friendlyShareError(raw: string | undefined): string {
+/** The Sources sentence for a verb refusal. The busy subclass answers
+ *  first: a share still in use is err.shareBusy whatever the message
+ *  says. One case is Sources' own: a mount refused because the share's
+ *  vault has no password is not a device fault - the operator types the
+ *  password on Edit, then presses Connect - and the shared mapper's
+ *  sentence for that string belongs to File-sharing user-add. Everything
+ *  else defers to friendlyVerbError. Sources paints through this and
+ *  nothing else. */
+export function friendlyShareError(
+  raw: string | undefined,
+  subclass?: string | null
+): string {
+  if (subclass === SHARE_BUSY_SUBCLASS) {
+    if (raw !== undefined && raw.length > 0 && typeof console !== "undefined") {
+      // eslint-disable-next-line no-console
+      console.error("[verb error]", raw);
+    }
+    return t("err.shareBusy");
+  }
   if (isSharePasswordMissing(raw)) {
     if (raw !== undefined && raw.length > 0 && typeof console !== "undefined") {
       // eslint-disable-next-line no-console

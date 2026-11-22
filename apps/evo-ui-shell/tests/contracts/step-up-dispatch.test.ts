@@ -69,6 +69,10 @@ test("isElevationRequired: ordinary error / undefined are not elevation", () => 
 // The token rides the request payload; the steward validates it for that
 // dispatch. This fixture FAILS if `request` is put back on the skip list
 // (it would then pass the refusal straight through, acquiring nothing).
+// The shelf is neutral on purpose: the network, power and hardware-audio
+// writes gate at write rank, where the household door answers
+// household_policy_locked (the fixtures below), not step_up_required.
+// step_up_required is what a verb declared at step-up rank answers.
 test("request op: step_up_required raises the card, retry with token admits", async () => {
   const b = bridge("tok-req");
   let seenToken: unknown = "unset";
@@ -80,7 +84,7 @@ test("request op: step_up_required raises the card, retry with token admits", as
   const r = await dispatchWithStepUp(
     send,
     "request",
-    { shelf: "networking.link" },
+    { shelf: "example.step_up_shelf" },
     undefined,
     b
   );
@@ -93,7 +97,7 @@ test("request op: step_up_required raises the card, retry with token admits", as
 test("request op: operator cancels -> original step_up_required returned", async () => {
   const b = bridge(null);
   const send = async () => ({ error: STEPUP });
-  const r = await dispatchWithStepUp(send, "request", { shelf: "networking.link" }, undefined, b);
+  const r = await dispatchWithStepUp(send, "request", { shelf: "example.step_up_shelf" }, undefined, b);
   assert.equal((r.error as { subclass?: string }).subclass, "step_up_required");
   assert.equal(b.acquired, 1);
 });

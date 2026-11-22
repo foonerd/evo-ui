@@ -28,6 +28,8 @@ import { ClassicalMetadataStrip } from "../features/classical/ClassicalMetadataS
 import type { ClassicalTags } from "../features/classical/classical-tags";
 import { ScrollingText, type TextOverflowMode } from "./ScrollingText";
 import { CoverImg } from "./CoverImg";
+import { useArtworkResolvedTick } from "../features/library/artwork-resolved";
+import { withLandingBust } from "../features/library/artwork-src";
 
 export interface TrackTileProps {
   shape: "row" | "card";
@@ -114,10 +116,17 @@ export function TrackTile({
     .filter(Boolean)
     .join(" ");
 
+  // A resolve address whose art lands later (background enrichment) is
+  // re-requested in place on its own landing; a hash address is
+  // immutable and never re-requested.
+  const landing = useArtworkResolvedTick(artworkUrl);
   const art = (
     <>
       {placeholderIcon}
-      <CoverImg className="track-tile-thumb-img" src={artworkUrl} />
+      <CoverImg
+        className="track-tile-thumb-img"
+        src={withLandingBust(artworkUrl, landing)}
+      />
     </>
   );
 

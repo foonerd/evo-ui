@@ -1,8 +1,9 @@
 // SmbServerSurface - the device's own SMB file server. Enable the
 // server, pick the minimum protocol, and manage SMB users. The device
 // shares its library OUT; distinct from Sources (which mounts NAS in).
-// Mutations are network_admin step-up gated, so the same on-surface
-// "Pair this device" path as Sources drives elevation in place. User
+// Mutations gate at write:network_admin with the household policy as
+// the door on top, the same as Sources; a pair-ceremony refusal offers
+// the same on-surface "Pair this device" path in place. User
 // passwords never ride the wire - user_add carries a credential_key and
 // the device prompts for the password (responder renders it).
 

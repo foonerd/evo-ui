@@ -9,6 +9,13 @@
 // share is in use. Holders, ids and the subprocess line never leave
 // this module; the surface asks yes / no and paints one sentence.
 
+/** The subclass the shares plugin sends on a busy refusal. It wins over
+ *  the message: the plugin's own words no longer say "target is busy",
+ *  and the WS can leave only a status line ("refused: 400 Bad Request").
+ *  The message words below stay the fallback for a refusal with no
+ *  subclass. */
+export const SHARE_BUSY_SUBCLASS = "share_busy";
+
 /** Whether a verb error or event detail is the busy refusal. Empty
  *  holders still match. */
 export function isShareBusyReason(raw: string | null | undefined): boolean {

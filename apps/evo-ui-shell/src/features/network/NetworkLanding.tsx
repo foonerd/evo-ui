@@ -407,6 +407,25 @@ export function NetworkLanding(): JSX.Element {
   );
 }
 
+/** What the radios are actually doing.
+ *
+ *  This was a binary on flight mode, so flight-off always read
+ *  "Wi-Fi and AP active" - on a device whose access point is off, and on
+ *  one that has no radio able to carry an access point at all. The line
+ *  asserted a thing the card next to it was calling Off.
+ *
+ *  The access point's liveness is the same fact the AP card uses:
+ *  the connected row whose connection is the hotspot profile or whose
+ *  address is shared. Flight on still suspends everything, and says so. */
+function radioHint(link: Link): string {
+  if (link.flightMode) return t("settings.network.flightOnHint");
+  const hotspotName = hotspotConnectionName(link.intent.fallback.hotspot_connection_name);
+  const apLive = findHotspotRow(link.deviceTable, hotspotName) !== null;
+  return apLive
+    ? t("settings.network.flightOffHint")
+    : t("settings.network.flightOffApOffHint");
+}
+
 function AdvancedTile({ link }: { link: Link }): JSX.Element {
   const intent = link.intent;
   const rp = intent.radio_policy;
@@ -486,9 +505,7 @@ function AdvancedTile({ link }: { link: Link }): JSX.Element {
       {intent.wifi.sta_mac_random ? (
         <div className="net-tile-sub">{t("settings.network.randomMacHint")}</div>
       ) : null}
-      <div className="net-tile-sub">
-        {link.flightMode ? t("settings.network.flightOnHint") : t("settings.network.flightOffHint")}
-      </div>
+      <div className="net-tile-sub">{radioHint(link)}</div>
     </div>
   );
 }

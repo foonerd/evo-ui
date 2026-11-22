@@ -2,6 +2,7 @@ import {
   decodeClassicalTags,
   type ClassicalTags
 } from "../classical/classical-tags.ts";
+import { decodeArtworkHash } from "./artwork-src.ts";
 import { t } from "../../runtime/i18n.ts";
 
 // Pure decoders for the audio.library shelf.
@@ -277,6 +278,9 @@ export interface LibraryEntry {
    *  tile lazy-loads it; the browse-artwork flag gates whether the
    *  render uses it. */
   artworkUrl: string | null;
+  /** Scan-time content hash of a file row's local art (`artwork_hash`),
+   *  64 lowercase hex, or null. The tile paints it through artworkSrc. */
+  artworkHash: string | null;
   /** Resolver URL for a directory entry's cover, rendered as a plain
    *  <img>. The scheme is chosen library-side by pick_directory_cover_url
    *  (that function is the source of truth; this is a consumer):
@@ -320,6 +324,7 @@ export function decodeLibraryEntry(raw: unknown): LibraryEntry | null {
     artist: stringField(raw, "artist"),
     album: stringField(raw, "album"),
     artworkUrl: stringField(raw, "artwork_url"),
+    artworkHash: decodeArtworkHash(raw["artwork_hash"]),
     coverUrl: stringField(raw, "cover_url"),
     classical: decodeClassicalTags(raw)
   };
@@ -381,7 +386,15 @@ export interface FacetEntry {
   value: string;
   artist: string | null;
   coverUrl: string | null;
+  /** Scan-time content hash of an album tile's local art
+   *  (`artwork_hash`), 64 lowercase hex, or null. */
+  artworkHash: string | null;
   trackCount: number | null;
+  /** The album's stable identity (album_id) when the answer carries
+   *  one; null for the other facets and for an album without it. The
+   *  album drill and Forget album send this when present, the display
+   *  title when not. */
+  albumId: string | null;
 }
 
 /** Decoded library.browse_by_<facet> response. Wire shape:
@@ -412,7 +425,9 @@ export function decodeFacetBrowse(
         value: v,
         artist: stringField(entry, "artist"),
         coverUrl: stringField(entry, "cover_url"),
-        trackCount: intField(entry, "track_count")
+        artworkHash: decodeArtworkHash(entry["artwork_hash"]),
+        trackCount: intField(entry, "track_count"),
+        albumId: facet === "album" ? stringField(entry, "album_id") : null
       });
     }
   }
@@ -463,6 +478,33 @@ export function decodeSearchResults(raw: unknown): LibraryEntry[] {
     }
   }
   return out;
+}
+
+/** Decoded library.search_library answer. `results` is the answer's own
+ *  order - the plugin ranks (local, then USB and NAS, then DLNA, then
+ *  cloud; within a source, that source's order) and the glass never
+ *  sorts again. Every hit decodeLibraryEntry understands is kept, a
+ *  dlna: file included. `staleSources` names the sources that were not
+ *  searched or were cut short; the surface shows them, so an empty
+ *  result with a named source is never a silent blank. */
+export interface SearchLibraryResponse {
+  results: LibraryEntry[];
+  staleSources: string[];
+  truncated: boolean;
+}
+
+export function decodeSearchLibrary(raw: unknown): SearchLibraryResponse | null {
+  if (!isObject(raw)) return null;
+  if (!Array.isArray(raw["results"])) return null;
+  const staleRaw = raw["stale_sources"];
+  const staleSources: string[] = Array.isArray(staleRaw)
+    ? staleRaw.filter((v): v is string => typeof v === "string" && v.length > 0)
+    : [];
+  return {
+    results: decodeSearchResults(raw),
+    staleSources,
+    truncated: boolField(raw, "truncated", false)
+  };
 }
 
 export interface ProbeSourceResponse {

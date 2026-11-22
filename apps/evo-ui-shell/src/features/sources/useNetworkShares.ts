@@ -1,18 +1,23 @@
 // useNetworkShares / useDiscoveredNas - hooks for the
 // networking.shares shelf (Phase 3c: live mutations).
 //
-// AUTHORITY MODEL (verified on the wire): every mutating verb is
-// step-up gated on network_admin. A session holds that scope by
-// presenting a bearer minted with it. Presenting a bearer REPLACES
-// the anonymous LAN-trust grants, so the working admin mint is:
+// AUTHORITY MODEL: every mutating verb on this shelf declares
+// write:network_admin in the plugin manifest. A pair or kiosk bearer
+// holds that scope, and so does a LAN caller without a bearer while
+// the owner's protection policy polices the LAN. That policy is the one
+// door on top: while it protects network_admin, the call needs the
+// owner's step-up sitting, and without one it answers the policy lock -
+// never step_up_required. No client-side rank check gates the
+// controls.
+//
+// A hand-minted admin bearer for bench work still needs the plugins
+// scope (the plugin-request wire op) and subjects (the happenings
+// subscription) beside network_admin, because presenting a bearer
+// replaces the anonymous LAN-trust grants:
 //
 //   evo-plugin-tool admin auth mint-bearer-token \
 //     --reason "..." --ttl-seconds 3600 \
 //     --scope network_admin --scope plugins --scope subjects
-//
-// (plugins covers the plugin-request wire op, subjects covers the
-// happenings subscription.) The page reads the stored bearer; when
-// it carries step_up:network_admin the mutating affordances enable.
 //
 // Share STATE lives per share (network.share.get_state + the
 // network_share_state subject), not on the configured record; this
@@ -69,7 +74,10 @@ const MESSAGES = {
   refused: () => t("sources.refused")
 };
 
-/** True when the stored bearer can drive share mutations. */
+/** True when the stored bearer carries network_admin at step-up rank,
+ *  which is what a pair or kiosk bearer is minted with; that rank
+ *  covers the write:network_admin the share verbs declare. Nothing
+ *  gates on this today - the owner's protection policy is the door. */
 export function hasNetworkAdmin(): boolean {
   return bearerHasScope(storedBearer(), "step_up", "network_admin");
 }
@@ -132,7 +140,7 @@ export interface UseNetworkSharesState {
     extra?: Record<string, unknown>
   ) => Promise<SubjectVerbResult>;
   /** Rebuild the bearer socket in place with the freshly stored token
-   *  after inline pairing, so newly-granted network_admin takes effect
+   *  after inline pairing, so the paired identity takes effect
    *  WITHOUT a reload (the operator stays on Sources). */
   reauth: () => void;
 }
@@ -310,9 +318,10 @@ export function useNetworkShares(): UseNetworkSharesState {
           };
         });
 
-  // Verbs accept extra envelope fields so the step-up gate can
-  // retry them with `step_up_token` (the token rides the op payload
-  // - the frame envelope itself is deny_unknown_fields).
+  // Verbs accept extra envelope fields so a caller can attach a
+  // `step_up_token` (the owner's sitting, which the protection policy
+  // spends while it protects network_admin); the token rides the op
+  // payload - the frame envelope itself is deny_unknown_fields.
   //
   // add / mount decode their SUCCESS body: the add verb lands even when
   // the mount it kicked off failed (prompt cancelled or timed out,
@@ -379,7 +388,7 @@ export function useNetworkShares(): UseNetworkSharesState {
     [request]
   );
   // network.share.edit nests the partial under `edits` (EditShareRequest
-  // = { share_id, edits }); the step-up token (extra) rides at top level.
+  // = { share_id, edits }); a sitting token (extra) rides at top level.
   const edit = useCallback(
     (
       shareId: string,

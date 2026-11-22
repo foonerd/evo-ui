@@ -9,6 +9,8 @@
 //  - payload already carried a token -> do NOT loop; return as-is.
 //  - a cached token satisfies the retry -> return the retry.
 //  - cached token stale -> clear it, prompt once.
+//  - cached token rode the send and was refused as household-locked,
+//    step_up_expired or step_up_invalid -> clear it, prompt once.
 //  - operator cancels the card -> return the ORIGINAL refusal (never a
 //    fabricated success).
 //  - retry still refused -> return the retry's refusal (the real error
@@ -19,7 +21,7 @@
 // for direct ops alike.
 
 import type { WireOpResult } from "../sdk/types";
-import { isElevationRequired } from "./step-up-elevation.ts";
+import { isElevationRequired, isSittingRefused } from "./step-up-elevation.ts";
 import { isHouseholdLocked } from "./authz-classify.ts";
 
 /** Raw single-shot send - the transport's own frame send + await. */
@@ -98,17 +100,19 @@ export async function dispatchWithStepUp(
   const first = await send(op, firstPayload, opts);
   if (
     first.error !== undefined &&
-    isHouseholdLocked(first.error) &&
+    (isHouseholdLocked(first.error) || isSittingRefused(first.error)) &&
     cachedUpFront !== null &&
     bridge !== null
   ) {
-    // The cached sitting rode the first send and the household gate
-    // still refused: that sitting is spent (expired, revoked, a steward
-    // restart). Clear it - and raise the ONE card once, so the operator
-    // gets a fresh sitting instead of a dead end with no card and no
-    // sitting. Cancel returns this original lock. The re-entrancy guard
-    // keeps it to one card app-wide; a card already up means this
-    // dispatch surfaces the lock and does not stack a second.
+    // The cached sitting rode the first send and was refused: the
+    // household gate still locked, or the framework's own validation
+    // named it expired or invalid. That sitting is spent (expired,
+    // revoked, a steward restart). Clear it - and raise the ONE card
+    // once, so the operator gets a fresh sitting instead of a dead end
+    // with no card and no sitting. Cancel returns this original refusal.
+    // The re-entrancy guard keeps it to one card app-wide; a card
+    // already up means this dispatch surfaces the refusal and does not
+    // stack a second.
     bridge.setToken(null);
     if (NON_ELEVATABLE_OPS.has(op) || TOKEN_KEY in payload || acquiring) {
       return first;
@@ -125,11 +129,14 @@ export async function dispatchWithStepUp(
     }
     bridge.setToken(fresh);
     const retried = await send(op, { ...payload, [TOKEN_KEY]: fresh }, opts);
-    if (retried.error !== undefined && isHouseholdLocked(retried.error)) {
-      // The card was already offered and the gate refused the fresh
-      // sitting too. A sitting the household gate would not spend is
-      // not a live override: clear it, so no gate opens on it, and
-      // surface that lock. One card, no loop.
+    if (
+      retried.error !== undefined &&
+      (isHouseholdLocked(retried.error) || isSittingRefused(retried.error))
+    ) {
+      // The card was already offered and the fresh sitting was refused
+      // too. A sitting the gate would not spend is not a live override:
+      // clear it, so no gate opens on it, and surface that refusal. One
+      // card, no loop.
       bridge.setToken(null);
     }
     return retried;
@@ -150,10 +157,13 @@ export async function dispatchWithStepUp(
   const cached = bridge.getToken();
   if (cached !== null) {
     const retry = await send(op, { ...payload, [TOKEN_KEY]: cached }, opts);
-    if (retry.error === undefined || !isElevationRequired(retry.error)) {
+    if (
+      retry.error === undefined ||
+      (!isElevationRequired(retry.error) && !isSittingRefused(retry.error))
+    ) {
       return retry;
     }
-    bridge.setToken(null); // stale - fall through to a fresh prompt
+    bridge.setToken(null); // stale or refused - fall through to a fresh prompt
   }
 
   acquiring = true;
@@ -167,5 +177,9 @@ export async function dispatchWithStepUp(
     return first; // operator cancelled - surface the original refusal
   }
   bridge.setToken(token);
-  return await send(op, { ...payload, [TOKEN_KEY]: token }, opts);
+  const last = await send(op, { ...payload, [TOKEN_KEY]: token }, opts);
+  if (last.error !== undefined && isSittingRefused(last.error)) {
+    bridge.setToken(null); // a fresh sitting refused as dead is not kept
+  }
+  return last;
 }

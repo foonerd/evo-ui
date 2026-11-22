@@ -2,12 +2,12 @@
 //
 // The two Audio hooks (useAudioOptions, useHardwareAudio) each open a
 // private anonymous seed socket for their reads and happenings. Every
-// mixer / DSP / DAC write used to go out on that seed socket too. After
-// this browser pairs, its step-up sitting is bound to bearer:<id>; a
-// write that stays on the anonymous seed socket presents that sitting
-// from the LAN-trust identity, the framework refuses it as another
-// peer's (step_up_required), and the card comes up again for a
-// password that can never satisfy.
+// mixer / DSP / DAC write used to go out on that seed socket too. With
+// a stored bearer, a write goes out as the identity this browser paired
+// as: the hardware.audio writes gate at write:audio_admin, which a pair
+// or kiosk bearer holds. No household group protects audio_admin, so
+// these writes ask for no sitting; were one asked, it would be bound to
+// bearer:<id> and could only be spent from that identity.
 //
 // Same rule as the kiosk and household write sockets: with a stored
 // bearer, writes ride a private socket that presents it (read at every
@@ -23,7 +23,7 @@ export function audioWriteSocket(hasStoredBearer: boolean): AudioWriteSocket {
 }
 
 /** The hardware.audio verbs the plugin manifest gates as
- *  step_up:audio_admin - the shelf's mutating set (verified against
+ *  write:audio_admin - the shelf's mutating set (verified against
  *  org.evoframework.hardware.audio-config/manifest.toml,
  *  [capabilities.respondent.verb_capabilities]). Every other verb on
  *  the shelf is a read by that same manifest (list_dac_catalogue,

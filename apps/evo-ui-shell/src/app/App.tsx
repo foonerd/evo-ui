@@ -86,6 +86,7 @@ import { QueueSurface } from "../features/queue/QueueSurface";
 import { ComingNextList } from "../features/queue/ComingNextList";
 import { BrowseSurface } from "../features/browse/BrowseSurface";
 import { LibrarySurface } from "../features/library/LibrarySurface";
+import { useArtworkResolvedSubscription } from "../features/library/artwork-resolved";
 import { FavouritesSurface } from "../features/favourites/FavouritesSurface";
 import { PlaylistsSurface } from "../features/playlist/PlaylistsSurface";
 import { WorksSurface } from "../features/works/WorksSurface";
@@ -107,6 +108,7 @@ import type { DiagnosticsSurfaceProps } from "../features/system/DiagnosticsSurf
 import { OperationsSurface } from "../features/operations/OperationsSurface";
 import { SidebarSystemActions } from "../features/system/SidebarSystemActions";
 import { ComingSoonSurface } from "../features/system/ComingSoonSurface";
+import { SoftwareUpdateSurface } from "../features/update/SoftwareUpdateSurface";
 import { useInFlightRegistry } from "../core/useInFlightRegistry";
 import {
   appendCommandLogEntry,
@@ -374,6 +376,10 @@ function AppShell({
 }: {
   embeddedInDisplayTest?: boolean;
 } = {}) {
+  // One artwork_resolved subscription for the whole shell: a landing
+  // reaches every list surface (Library, Queue, Favourites, Playlists),
+  // and each tile follows its own key.
+  useArtworkResolvedSubscription();
   const client = useMemo(() => new GatewayClient(), []);
   const wsUrl = useMemo(() => {
     if (typeof window === "undefined") {
@@ -1967,9 +1973,6 @@ function AppShell({
             <OperationsSurface
               logLevelStatus={getCapabilityStatus(state.capabilities, "maintenance.log_level")}
               diagnosticsStatus={getCapabilityStatus(state.capabilities, "diagnostics.bundle")}
-              updatesChannelStatus={getCapabilityStatus(state.capabilities, "updates.channels")}
-              updatesCoreStatus={getCapabilityStatus(state.capabilities, "updates.apply.core")}
-              updatesPluginsStatus={getCapabilityStatus(state.capabilities, "updates.apply.plugins")}
               pluginLifecycleStatus={getCapabilityStatus(state.capabilities, "plugin.lifecycle")}
               sshStatus={getCapabilityStatus(state.capabilities, "system.ssh")}
               client={client}
@@ -2003,17 +2006,7 @@ function AppShell({
           ) : null}
 
           {activeView === "update" ? (
-            <ComingSoonSurface
-              title="Software update"
-              lede="Check for and apply framework and plugin updates on this device."
-              icon={<DownloadCloud size={20} />}
-              planned={[
-                "Check for framework and plugin updates",
-                "Apply an update with a clear progress indicator",
-                "Choose a release channel (stable or beta)",
-                "Review update history"
-              ]}
-            />
+            <SoftwareUpdateSurface />
           ) : null}
         </section>
 

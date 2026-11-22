@@ -55,3 +55,20 @@ export function resolveProbeRead(opts: {
   if (!opts.probing) return "none";
   return opts.readLanded ? "purge" : "backout";
 }
+
+/** What a landed anonymous read means once the stored bearer has been
+ *  re-handshaken at that moment. The bearer's earlier failure may have
+ *  been the outage (a reboot, a steward restart) and not the token: the
+ *  anonymous probe kept retrying until the device answered, so its read
+ *  landing proves the device up NOW, not that the token was refused.
+ *  One bearer upgrade at that moment decides it. */
+export type BearerRecheck =
+  /** The bearer upgraded: the token is live. Keep it. */
+  | "keep-bearer-live"
+  /** The bearer was refused while the anonymous upgrade succeeded: the
+   *  token is dead. Purge it. */
+  | "purge";
+
+export function resolveBearerRecheck(bearerUpgradeLanded: boolean): BearerRecheck {
+  return bearerUpgradeLanded ? "keep-bearer-live" : "purge";
+}

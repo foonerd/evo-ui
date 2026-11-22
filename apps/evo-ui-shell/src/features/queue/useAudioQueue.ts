@@ -77,7 +77,8 @@ export interface AudioQueueState {
   /** Multi-dimensional, server-side enqueue: the plugin resolves the
    *  selection to tracks and applies the mode in one MPD roundtrip
    *  (replace = atomic clear+add+play). Scale-safe - no URI list on
-   *  the wire. */
+   *  the wire. An empty answer is refused with the empty line; the
+   *  queue is unchanged. */
   enqueueSelection: (
     selection: Selection,
     mode: EnqueueSelectionMode
@@ -107,6 +108,10 @@ export interface AudioQueueState {
   removeItem: (id: number) => Promise<QueueVerbResult>;
   moveItem: (id: number, toPosition: number) => Promise<QueueVerbResult>;
   clearQueue: () => Promise<QueueVerbResult>;
+  /** Put the kept last queue back. The player cues the row that was
+   *  playing and pauses; the glass sends nothing after this write -
+   *  the operator presses play. */
+  restoreLastQueue: () => Promise<QueueVerbResult>;
   loadPlaylist: (playlistName: string) => Promise<QueueVerbResult>;
   appendPlaylist: (playlistName: string) => Promise<QueueVerbResult>;
   saveAsPlaylist: (playlistName: string) => Promise<QueueVerbResult>;
@@ -326,12 +331,6 @@ export function useAudioQueue(): AudioQueueState {
     [dispatch]
   );
 
-  const enqueueSelection = useCallback(
-    (selection: Selection, mode: EnqueueSelectionMode) =>
-      dispatch("queue.enqueue_selection", { selection, mode }),
-    [dispatch]
-  );
-
   const enqueueSelectionStatus = useCallback(
     async (
       selection: Selection,
@@ -361,6 +360,12 @@ export function useAudioQueue(): AudioQueueState {
     },
     []
   );
+
+  // Play next / Add to queue / Clear and play read the answer's status
+  // exactly as Play now does: an empty selection is the empty line, the
+  // queue is unchanged, never a silent success. Same verb, same payload,
+  // one send.
+  const enqueueSelection = enqueueSelectionStatus;
 
   // Container enqueue for a DLNA MediaServer folder. The device
   // descends the subtree in one verb (`next_page` is always null).
@@ -416,6 +421,11 @@ export function useAudioQueue(): AudioQueueState {
 
   const clearQueue = useCallback(
     () => dispatch("queue.clear_queue", {}),
+    [dispatch]
+  );
+
+  const restoreLastQueue = useCallback(
+    () => dispatch("queue.restore_last_queue", {}),
     [dispatch]
   );
 
@@ -563,6 +573,7 @@ export function useAudioQueue(): AudioQueueState {
     removeItem,
     moveItem,
     clearQueue,
+    restoreLastQueue,
     loadPlaylist,
     appendPlaylist,
     saveAsPlaylist,

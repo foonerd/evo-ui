@@ -640,7 +640,9 @@ test("decodeAudioOptionsSettings decodes dop, volume_normalization, resampling",
   assert.notEqual(s, null);
   if (s === null) return;
   assert.equal(s.dop, true);
-  assert.equal(s.volumeNormalization, true);
+  // The old bool is read the way the device reads its own old file:
+  // true is track (A1: volume normalization is a mode).
+  assert.equal(s.volumeNormalization, "track");
   assert.equal(s.resampling.enabled, true);
   assert.equal(s.resampling.targetSamplerate, "192000");
   assert.equal(s.resampling.quality, "very_high");
@@ -651,7 +653,7 @@ test("decodeAudioOptionsSettings defaults dop/volume_normalization/resampling wh
   assert.notEqual(s, null);
   if (s === null) return;
   assert.equal(s.dop, false);
-  assert.equal(s.volumeNormalization, false);
+  assert.equal(s.volumeNormalization, "disabled");
   assert.equal(s.resampling.enabled, false);
 });
 

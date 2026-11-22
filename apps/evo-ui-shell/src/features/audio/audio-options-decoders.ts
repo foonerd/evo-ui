@@ -91,8 +91,11 @@ export interface AudioOptionsSettings {
   outputDevice: string;
   /** Bit-perfect DoP: carry DSD over a PCM transport. */
   dop: boolean;
-  /** Volume normalization (loudness levelling) on / off. */
-  volumeNormalization: boolean;
+  /** ReplayGain levelling as the device reports it: "disabled" (play the
+   *  file as mastered), "track" (each track against its own tag) or
+   *  "album" (the album as one). An old device's true / false is read
+   *  the way the device reads its own old file: true is track. */
+  volumeNormalization: VolumeNormalizationMode;
   /** Resampling / SRC policy. */
   resampling: ResamplingPolicy;
   /** Exclusive (hog) device mode. When true the chain pins
@@ -110,6 +113,30 @@ export interface AudioOptionsSettings {
   /** The 10 parametric-EQ bands. Always exactly 10, flat-default
    *  (1 kHz / 0 dB / Q 1.0) when absent. */
   eqBands: EqBand[];
+  /** The device's composition mode as it reports it on this subject:
+   *  "eq_only" or "passthrough". null when the field is absent - the
+   *  player has not reported the mode yet, which is not "off". */
+  compositionMode: CompositionMode | null;
+}
+
+export type CompositionMode = "eq_only" | "passthrough";
+
+export type VolumeNormalizationMode = "disabled" | "track" | "album";
+
+export const VOLUME_NORMALIZATION_MODES: ReadonlyArray<VolumeNormalizationMode> = [
+  "disabled",
+  "track",
+  "album"
+];
+
+function coerceVolumeNormalization(raw: unknown): VolumeNormalizationMode {
+  if (raw === "track" || raw === "album" || raw === "disabled") return raw;
+  if (raw === true) return "track";
+  return "disabled";
+}
+
+function coerceCompositionMode(raw: unknown): CompositionMode | null {
+  return raw === "eq_only" || raw === "passthrough" ? raw : null;
 }
 
 function coerceMixerType(raw: unknown): MixerType {
@@ -152,13 +179,14 @@ export function decodeAudioOptionsSettings(
     volumeCurve: coerceVolumeCurve(raw["volume_curve"]),
     outputDevice: stringField(raw, "output_device") ?? "",
     dop: boolField(raw, "dop") ?? false,
-    volumeNormalization: boolField(raw, "volume_normalization") ?? false,
+    volumeNormalization: coerceVolumeNormalization(raw["volume_normalization"]),
     resampling: decodeResamplingPolicy(raw["resampling"]),
     exclusiveMode: boolField(raw, "exclusive_mode") ?? false,
     crossfadeSeconds: clampCrossfadeSeconds(raw["crossfade_seconds"]),
     gapless: boolField(raw, "gapless") ?? true,
     eqEngaged: boolField(raw, "eq_engaged") ?? false,
-    eqBands: decodeEqBandsField(raw["eq_bands"])
+    eqBands: decodeEqBandsField(raw["eq_bands"]),
+    compositionMode: coerceCompositionMode(raw["composition_mode"])
   };
 }
 
@@ -931,7 +959,9 @@ export function decodePendingReboot(raw: unknown): PendingReboot | null {
 // =============================================================
 //
 // The system.power shelf carries reboot_device + power_off_device,
-// each step_up:system_admin gated at the framework dispatcher. The
+// each gated at write:system_admin at the framework dispatcher, with the
+// household policy as the door on top (household_policy_locked while it
+// protects system_admin and no sitting rides the call). The
 // UI dispatches them through the canonical `request` op and
 // surfaces the result. Wire shape follows the shelf's published
 // schema and the framework's list_plugins surface.
@@ -981,7 +1011,8 @@ export type PowerVerbOutcome =
  *
  *  - no error envelope                 -> accepted (verb ran)
  *  - connection dropped / aborted      -> accepted (host shutting down)
- *  - PermissionDenied/step_up_required -> step_up_required
+ *  - PermissionDenied/step_up_required -> step_up_required (kept for a
+ *    distribution that declares the verbs at step-up rank)
  *  - PermissionDenied/scope_not_granted-> not_authorised
  *  - any other error                   -> error
  *

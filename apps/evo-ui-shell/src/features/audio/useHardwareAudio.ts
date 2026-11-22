@@ -18,7 +18,7 @@
 // the UI never clears - dsp.list_controls, modder.list_overlays) and
 // the happenings subscription ride the private anonymous seed socket
 // opened at mount. The shelf's mutating verbs (the manifest's
-// step_up:audio_admin set) ride a second private socket that presents
+// write:audio_admin set) ride a second private socket that presents
 // the stored pair / kiosk bearer when one is stored (read at every
 // handshake, rotated by the bearer bus, closed on unmount); with no
 // bearer they stay on the seed socket. The seed socket is never given

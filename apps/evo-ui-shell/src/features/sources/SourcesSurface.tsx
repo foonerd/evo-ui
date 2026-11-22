@@ -1,8 +1,9 @@
 // SourcesSurface - the Sources menu destination (ruled S1-A).
-// Phase 3c: mutations are LIVE when the session's bearer carries
-// step_up:network_admin (see useNetworkShares for the mint recipe).
-// Without it, every mutating control renders disabled with the
-// reason - same honesty rule as before, now with a real unlock.
+// The share verbs gate at write:network_admin (see useNetworkShares).
+// The household policy is the one door on top of that rank: a lock
+// paints the household line and opens the household door. There is no
+// client-side network_admin pre-flight - a control starts on a valid
+// form and the dispatch decides.
 //
 // Add-share dialog: name, SMB/NFS, host, path, credentials
 // (Guest / User + password on the same dialog), advanced options.
@@ -37,7 +38,7 @@ import {
   type ShareItem
 } from "./useNetworkShares";
 import { friendlyShareError } from "./friendly-error";
-import { isShareBusyReason } from "./share-busy";
+import { SHARE_BUSY_SUBCLASS, isShareBusyReason } from "./share-busy";
 import {
   SHARES_PLUGIN_ID,
   diffShareEdits,
@@ -139,7 +140,7 @@ export function SourcesSurface({
         setFeedback(t("household.locked.body"));
         if (household !== null) household.open();
       } else {
-        setFeedback(friendlyShareError(r.message));
+        setFeedback(friendlyShareError(r.message, r.subclass));
       }
     } else {
       setAuthRefused(false);
@@ -173,6 +174,14 @@ export function SourcesSurface({
       setAuthRefused(false);
       setFeedback(t("household.locked.body"));
       if (household !== null) household.open();
+      return;
+    }
+    // The busy subclass answers first: the WS can leave only a status
+    // line, and the plugin's own words no longer say "target is busy".
+    // The words below stay the fallback for a refusal with no subclass.
+    if (r.subclass === SHARE_BUSY_SUBCLASS) {
+      setFeedback(t("err.shareBusy"));
+      if (!force) setDialog({ kind: "force", share });
       return;
     }
     setFeedback(friendlyShareError(r.message));
@@ -546,8 +555,9 @@ export function SourcesSurface({
       {pairOpen ? (
         // onPaired => pair IN PLACE (no reload): the operator chose Sources
         // and stays on Sources. We re-handshake BOTH bearer capabilities
-        // with the new token - the shares/discovery sockets (network_admin
-        // mutations) and the prompt responder (SMB password prompts) - so
+        // with the new token - the shares/discovery sockets (the
+        // write:network_admin mutations) and the prompt responder (SMB
+        // password prompts) - so
         // every control lights up without leaving the page.
         <PairDeviceFlow
           onClose={() => setPairOpen(false)}

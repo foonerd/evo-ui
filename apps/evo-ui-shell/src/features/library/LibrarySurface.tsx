@@ -25,6 +25,7 @@ import {
   CalendarDays,
   ChevronRight,
   Disc3,
+  EyeOff,
   Folder,
   FolderOpen,
   FolderTree,
@@ -34,12 +35,18 @@ import {
   ListMusic,
   ListPlus,
   Loader2,
+  Mic,
+  MicOff,
   Music,
   Play,
   Plus,
   RotateCw,
+  Search,
   Tags,
-  User
+  TrendingUp,
+  History,
+  User,
+  X
 } from "lucide-preact";
 import {
   ConfirmDialog,
@@ -64,6 +71,15 @@ import {
 } from "../../components/ListTextModeControl";
 import type { TextOverflowMode } from "../../components/ScrollingText";
 import { useLibrary } from "./useLibrary";
+import { withoutAlbum } from "./forget-album";
+import { SUGGEST_PAUSE_MS } from "./suggest";
+import { searchVoiceDispatcher } from "./search-voice";
+import { startVoiceInput, type VoiceSession } from "../../runtime/input/voice";
+import {
+  formatFinishedAt,
+  type PlayCount,
+  type PlayRecord
+} from "./play-history";
 import {
   LibraryRetractHeartbeat,
   LibraryScanHeartbeat
@@ -74,6 +90,10 @@ import {
   scanProgressLine
 } from "./scan-progress-line";
 import { removeSourceMessageKey } from "./remove-source-copy";
+import { removeNeedsSitting } from "./remove-household";
+import { isHouseholdLocked } from "../../runtime/authz-classify";
+import { useHouseholdModal } from "../household/HouseholdModalHost";
+import { useStepUpSitting } from "../household/useStepUpSitting";
 import {
   browseFollow,
   browseRefusalIsMissingStore,
@@ -88,7 +108,7 @@ import {
   browseQueueKebabItems,
   type BrowseQueueMode
 } from "./browse-kebab";
-import { useArtworkResolvedSubscription } from "./artwork-resolved";
+import { artworkSrc } from "./artwork-src";
 import { applyArtworkSize, readArtworkSize } from "./artwork-size";
 import { useAudioQueue } from "../queue/useAudioQueue";
 import type {
@@ -125,11 +145,13 @@ import {
   isRemovable,
   type BrowseLibraryResponse,
   type FacetBrowseResponse,
+  type FacetEntry,
   type FacetKind,
+  type SearchLibraryResponse,
   type LibraryEntry,
   type SourceRecord
 } from "./library-decoders";
-import { t } from "../../runtime/i18n";
+import { t, tn } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
 
 type CollectionViewMode = "list" | "tile";
@@ -206,9 +228,8 @@ export function LibrarySurface({
   onTextModeOverrideChange
 }: LibrarySurfaceProps) {
   useLocale();
-  // Step B: one shared artwork_resolved subscription for the whole browse
-  // surface; tiles react to their own key and swap glyph -> image in place.
-  useArtworkResolvedSubscription();
+  // The artwork_resolved subscription is mounted once by the shell, so a
+  // landing reaches every list surface, not only this one.
   const library = useLibrary();
   const sources = library.sources;
   const scanBeat = useMemo(
@@ -329,6 +350,259 @@ export function LibrarySurface({
     },
     [busy]
   );
+
+  // Play history (D1 + D2): Recently played and Most played. Not browse
+  // modes, not tied to the selected source, available on a media server.
+  // Opening one is one read with the envelope version only; the list is
+  // what the answer carries. Pressing the open control again closes it.
+  type HistoryView =
+    | { kind: "recent"; rows: PlayRecord[] }
+    | { kind: "most"; rows: PlayCount[] };
+  const [historyView, setHistoryView] = useState<HistoryView | null>(null);
+  const [historyLoading, setHistoryLoading] = useState<"recent" | "most" | null>(null);
+  const recentlyPlayed = library.recentlyPlayed;
+  const mostPlayed = library.mostPlayed;
+  const onOpenHistory = useCallback((kind: "recent" | "most") => {
+    if (historyView?.kind === kind) {
+      setHistoryView(null);
+      return;
+    }
+    setHistoryLoading(kind);
+    void (async () => {
+      try {
+        if (kind === "recent") {
+          const r = await recentlyPlayed();
+          if (r.ok) setHistoryView({ kind: "recent", rows: r.value });
+          else setFeedback(r.message);
+        } else {
+          const r = await mostPlayed();
+          if (r.ok) setHistoryView({ kind: "most", rows: r.value });
+          else setFeedback(r.message);
+        }
+      } finally {
+        setHistoryLoading(null);
+      }
+    })();
+  }, [historyView, recentlyPlayed, mostPlayed]);
+
+  // Forget a track (E1): one control on a file tile, confirmed on a
+  // dialog. Confirm is one request with the file's uri; after the answer
+  // the URI leaves every list on screen - browse entries, the facet drill,
+  // an open history panel - with no second read. Not a queue action; the
+  // browse kebab's six ids are untouched. A directory has no such control.
+  const [forgetTarget, setForgetTarget] = useState<LibraryEntry | null>(null);
+  const onForgetFile = useCallback((entry: LibraryEntry) => {
+    if (entry.kind !== "file") return;
+    setForgetTarget(entry);
+  }, []);
+  const dropForgottenUri = useCallback((uri: string) => {
+    setBrowseState((cur) =>
+      cur === null
+        ? cur
+        : { ...cur, entries: cur.entries.filter((e) => e.uri !== uri) }
+    );
+    setDrillTracks((cur) =>
+      cur === null ? cur : cur.filter((e) => e.uri !== uri)
+    );
+    setHistoryView((cur) => {
+      if (cur === null) return cur;
+      if (cur.kind === "recent") {
+        return { kind: "recent", rows: cur.rows.filter((r) => r.uri !== uri) };
+      }
+      return { kind: "most", rows: cur.rows.filter((r) => r.uri !== uri) };
+    });
+  }, []);
+
+  // Forget an album (E2): one control on an album tile, confirmed on a
+  // dialog. Confirm is one request by the identity the album drill uses
+  // (album_id, else title + parent artist); after the answer the tile
+  // leaves the album list and an open drill of that album drops its
+  // tracks, with no second read. Artist, genre and year tiles get no
+  // such control; the file keeps its own.
+  // The dialog remembers which source's album list the tile came from:
+  // the operator may switch mode or source while it is open, and the
+  // confirm still forgets that album without touching any other list.
+  const [forgetAlbumTarget, setForgetAlbumTarget] = useState<{
+    entry: FacetEntry;
+    sourceId: string;
+  } | null>(null);
+  const onForgetAlbum = useCallback((entry: FacetEntry) => {
+    setForgetAlbumTarget({ entry, sourceId: selectedSource });
+  }, [selectedSource]);
+  const dropForgottenAlbum = useCallback((target: { entry: FacetEntry; sourceId: string }) => {
+    // The album cache is written from the album cache only - never from
+    // whatever list is on screen.
+    const key = `${target.sourceId}:album`;
+    const cached = FACET_CACHE.get(key);
+    if (cached !== undefined) {
+      FACET_CACHE.set(key, { ...cached, entries: withoutAlbum(cached.entries, target.entry) });
+    }
+    // The painted list is filtered only when it is that source's album list.
+    if (browseMode === "album" && selectedSource === target.sourceId) {
+      setFacetState((cur) =>
+        cur === null ? cur : { ...cur, entries: withoutAlbum(cur.entries, target.entry) }
+      );
+    }
+    if (drill?.facet === "album" && drill.value === target.entry.value) {
+      setDrillTracks([]);
+    }
+  }, [browseMode, drill, selectedSource]);
+
+  // Search (F1): one field, submitted. One request per submit with the
+  // query alone - no source_ids, so every enabled source is searched. The
+  // results are painted in the answer's order; a hit the decoder kept (a
+  // dlna: file included) is THE file tile, so its Play now is the
+  // existing play of that URI. Sources named in stale_sources are shown.
+  const [searchDraft, setSearchDraft] = useState<string>("");
+  const [searchState, setSearchState] = useState<
+    (SearchLibraryResponse & { query: string }) | null
+  >(null);
+  const [searchLoading, setSearchLoading] = useState<boolean>(false);
+  const searchLibrary = library.searchLibrary;
+  // The one search path. The form submit and a chosen suggestion both go
+  // through it; library.search_library is sent from here and nowhere
+  // else on the surface.
+  const submitSearch = useCallback((query: string) => {
+    setSearchLoading(true);
+    void (async () => {
+      try {
+        const r = await searchLibrary(query);
+        if (r.ok) {
+          setSearchState({ ...r.value, query });
+          setFeedback("");
+        } else {
+          setFeedback(r.message);
+        }
+      } finally {
+        setSearchLoading(false);
+      }
+    })();
+  }, [searchLibrary]);
+  const onSubmitSearch = useCallback((event: Event) => {
+    event.preventDefault();
+    const query = searchDraft.trim();
+    if (query.length === 0) return;
+    submitSearch(query);
+  }, [searchDraft, submitSearch]);
+
+  // Suggestions (F2): a keystroke neither searches nor suggests at once.
+  // When typing pauses, one library.suggest with the latest prefix; a
+  // later keystroke replaces the pending prefix. An empty field (spaces
+  // included) sends nothing and clears the list. A stale answer - one
+  // that lands after a newer prefix - is dropped, not painted.
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const suggestTimer = useRef<number | null>(null);
+  const suggestSeq = useRef<number>(0);
+  const suggest = library.suggest;
+  const onSearchInput = useCallback((value: string) => {
+    setSearchDraft(value);
+    if (suggestTimer.current !== null) {
+      window.clearTimeout(suggestTimer.current);
+      suggestTimer.current = null;
+    }
+    const prefix = value.trim();
+    if (prefix.length === 0) {
+      suggestSeq.current += 1;
+      setSuggestions([]);
+      return;
+    }
+    suggestTimer.current = window.setTimeout(() => {
+      suggestTimer.current = null;
+      const seq = ++suggestSeq.current;
+      void (async () => {
+        const r = await suggest(prefix);
+        if (seq !== suggestSeq.current) return;
+        setSuggestions(r.ok ? r.value : []);
+      })();
+    }, SUGGEST_PAUSE_MS);
+  }, [suggest]);
+  const onChooseSuggestion = useCallback((s: string) => {
+    if (suggestTimer.current !== null) {
+      window.clearTimeout(suggestTimer.current);
+      suggestTimer.current = null;
+    }
+    suggestSeq.current += 1;
+    setSuggestions([]);
+    setSearchDraft(s);
+    const query = s.trim();
+    if (query.length === 0) return;
+    submitSearch(query);
+  }, [submitSearch]);
+  useEffect(
+    () => () => {
+      if (suggestTimer.current !== null) window.clearTimeout(suggestTimer.current);
+    },
+    []
+  );
+
+  // Voice (F3): one mic beside the field, the browser speech recognition
+  // this shell already has. A recognised "search ..." puts the words in
+  // the field and goes through submitSearch once; play / pause / next
+  // are refused by the mic's own dispatcher - this mic is not a voice
+  // plane for anything else. A browser without recognition says so and
+  // sends nothing. One utterance, one search: the session stops after it.
+  const [voiceState, setVoiceState] = useState<
+    { kind: "idle" } | { kind: "listening" } | { kind: "note"; text: string }
+  >({ kind: "idle" });
+  const voiceSession = useRef<VoiceSession | null>(null);
+  const stopVoice = useCallback(() => {
+    voiceSession.current?.stop();
+    voiceSession.current = null;
+  }, []);
+  const onVoiceSearch = useCallback((query: string) => {
+    if (suggestTimer.current !== null) {
+      window.clearTimeout(suggestTimer.current);
+      suggestTimer.current = null;
+    }
+    suggestSeq.current += 1;
+    setSuggestions([]);
+    setSearchDraft(query);
+    stopVoice();
+    setVoiceState({ kind: "idle" });
+    submitSearch(query);
+  }, [stopVoice, submitSearch]);
+  const onToggleVoice = useCallback(() => {
+    if (voiceSession.current !== null) {
+      stopVoice();
+      setVoiceState({ kind: "idle" });
+      return;
+    }
+    const session = startVoiceInput(
+      searchVoiceDispatcher(onVoiceSearch),
+      (status) => {
+        if (status.kind === "unsupported") {
+          voiceSession.current = null;
+          setVoiceState({ kind: "note", text: t("library.voiceUnsupported") });
+        } else if (status.kind === "started") {
+          setVoiceState({ kind: "listening" });
+        } else if (status.kind === "no_match") {
+          setVoiceState({ kind: "note", text: t("library.voiceNoMatch", { text: status.text }) });
+        } else if (status.kind === "dispatched" && status.verb.kind !== "search") {
+          setVoiceState({ kind: "note", text: t("library.voiceHint") });
+        } else if (status.kind === "error") {
+          voiceSession.current = null;
+          setVoiceState({ kind: "note", text: status.message });
+        } else if (status.kind === "stopped") {
+          voiceSession.current = null;
+          setVoiceState((cur) => (cur.kind === "listening" ? { kind: "idle" } : cur));
+        }
+      }
+    );
+    voiceSession.current = session;
+  }, [onVoiceSearch, stopVoice]);
+  useEffect(() => () => stopVoice(), [stopVoice]);
+  const sourceDisplayName = useCallback(
+    (id: string): string => sources?.find((s) => s.id === id)?.displayName ?? id,
+    [sources]
+  );
+
+  // A history row plays the way a library file plays: append, then play
+  // that URI (the composition onPlayNowFile uses). No title is fetched.
+  const onPlayHistoryRow = useCallback((uri: string) => {
+    void runAction(t("collection.playNow"), () =>
+      audioQueue.appendAndPlay([uri])
+    );
+  }, [audioQueue, runAction]);
 
   // Browse the selected source whenever it changes (or on mount).
   // Source change clears the path back to root for a clean entry
@@ -903,6 +1177,21 @@ export function LibrarySurface({
     []
   );
 
+  // Remove and the household. A household lock paints the one household
+  // line and opens the one household door. When the household protects
+  // the sources group and no sitting is cached, the one existing card is
+  // asked before Remove is sent; cancel sends nothing.
+  const household = useHouseholdModal();
+  const sitting = useStepUpSitting();
+  const admitRemove = useCallback(async (): Promise<boolean> => {
+    if (
+      !removeNeedsSitting(household?.household.snapshot ?? null, sitting.live)
+    ) {
+      return true;
+    }
+    return await sitting.request();
+  }, [household, sitting]);
+
   const startUsbRemove = useCallback(
     async (target: SourceRecord): Promise<void> => {
       if (busy) return;
@@ -919,6 +1208,11 @@ export function LibrarySurface({
       if (!r.ok) {
         setUsbRemove(null);
         setBusy(false);
+        if (isHouseholdLocked(r)) {
+          setFeedback(t("household.locked.body"));
+          if (household !== null) household.open();
+          return;
+        }
         setFeedback(r.message);
         return;
       }
@@ -928,7 +1222,7 @@ export function LibrarySurface({
           : prev
       );
     },
-    [busy, library, usb.removal]
+    [busy, library, usb.removal, household]
   );
 
   // Stages: from the subject, and only from the subject.
@@ -1018,7 +1312,7 @@ export function LibrarySurface({
         title={browseArtworkOn ? entry.title ?? entry.name : entry.name}
         artist={browseArtworkOn ? entry.artist : null}
         album={browseArtworkOn ? entry.album : null}
-        artworkUrl={browseArtworkOn ? entry.artworkUrl : null}
+        artworkUrl={browseArtworkOn ? artworkSrc(entry.artworkHash, entry.artworkUrl) : null}
         placeholderIcon={<Music size={16} />}
         classical={showClassicalStrip ? entry.classical : null}
         textMode={textMode}
@@ -1053,6 +1347,15 @@ export function LibrarySurface({
               title={t("library.fileAddTitle")}
             >
               <Plus size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={() => onForgetFile(entry)}
+              disabled={busy}
+              aria-label={t("library.forget")}
+              title={t("library.forget")}
+            >
+              <EyeOff size={14} />
             </button>
             <KebabMenu
               disabled={busy}
@@ -1298,6 +1601,123 @@ export function LibrarySurface({
       </section>
 
       <div className="library-browse">
+        <form className="library-search" onSubmit={onSubmitSearch} role="search">
+          <label className="library-search-label" htmlFor="library-search-input">
+            {t("library.searchLabel")}
+          </label>
+          <input
+            id="library-search-input"
+            className="library-search-input"
+            type="search"
+            value={searchDraft}
+            placeholder={t("library.searchPlaceholder")}
+            onInput={(ev) => onSearchInput((ev.currentTarget as HTMLInputElement).value)}
+            onKeyDown={(ev) => {
+              if (ev.key === "Escape") {
+                suggestSeq.current += 1;
+                setSuggestions([]);
+              }
+            }}
+            disabled={searchLoading}
+            autoComplete="off"
+            aria-autocomplete="list"
+            aria-controls="library-search-suggestions"
+            aria-expanded={suggestions.length > 0}
+          />
+          <button
+            type="button"
+            className={
+              voiceState.kind === "listening"
+                ? "library-mode-btn library-mode-active"
+                : "library-mode-btn"
+            }
+            onClick={onToggleVoice}
+            disabled={searchLoading}
+            aria-pressed={voiceState.kind === "listening"}
+            aria-label={voiceState.kind === "listening" ? t("library.voiceStop") : t("library.voiceStart")}
+            title={voiceState.kind === "listening" ? t("library.voiceStop") : t("library.voiceStart")}
+          >
+            {voiceState.kind === "listening" ? <MicOff size={14} /> : <Mic size={14} />}
+          </button>
+          <button
+            type="submit"
+            className="library-mode-btn"
+            disabled={searchLoading || searchDraft.trim().length === 0}
+            title={t("library.searchSubmit")}
+          >
+            <Search size={14} />
+            <span>{t("library.searchSubmit")}</span>
+          </button>
+        </form>
+        {voiceState.kind === "listening" ? (
+          <p className="library-search-stale" role="status">{t("library.voiceListening")}</p>
+        ) : voiceState.kind === "note" ? (
+          <p className="library-search-stale" role="status">{voiceState.text}</p>
+        ) : null}
+        {suggestions.length > 0 ? (
+          <ul
+            id="library-search-suggestions"
+            className="library-suggestions"
+            role="listbox"
+            aria-label={t("library.suggestions")}
+          >
+            {suggestions.map((s, i) => (
+              <li key={`${i}:${s}`} role="option" aria-selected={false}>
+                <button type="button" className="library-suggestion" onClick={() => onChooseSuggestion(s)}>
+                  {s}
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
+        {searchState !== null ? (
+          <section className="library-search-results" aria-label={t("library.searchResults")}>
+            <div className="library-history-head">
+              <h3 className="library-history-title">
+                {t("library.searchResults", { query: searchState.query })}
+              </h3>
+              <button
+                type="button"
+                className="library-history-close"
+                onClick={() => setSearchState(null)}
+                aria-label={t("library.searchClose")}
+                title={t("library.searchClose")}
+              >
+                <X size={14} />
+              </button>
+            </div>
+            {searchState.staleSources.length > 0 ? (
+              <p className="library-search-stale" role="status">
+                {t("library.searchStale", {
+                  names: searchState.staleSources.map(sourceDisplayName).join(", ")
+                })}
+              </p>
+            ) : null}
+            {searchState.truncated ? (
+              <p className="library-search-stale">{t("library.searchTruncated")}</p>
+            ) : null}
+            {searchState.results.length === 0 ? (
+              <div className="library-empty">
+                {t("library.searchEmpty", { query: searchState.query })}
+              </div>
+            ) : (
+              <div className={viewMode === "tile" ? "library-entries library-entries-tile" : "library-entries"}>
+                {searchState.results.map((entry) =>
+                  entry.kind === "file" ? (
+                    renderFileTile(entry)
+                  ) : (
+                    <div key={`hit:${entry.uri}`} className="library-history-row">
+                      <span className="library-history-uri">{entry.name}</span>
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+          </section>
+        ) : null}
+        {/* end library-search-results */}
+
         <div
           className="library-browse-modes"
           role="group"
@@ -1328,6 +1748,102 @@ export function LibrarySurface({
             );
           })}
         </div>
+
+        <div
+          className="library-history-actions"
+          role="group"
+          aria-label={t("library.playHistory")}
+        >
+          <button
+            type="button"
+            className={
+              historyView?.kind === "recent"
+                ? "library-mode-btn library-mode-active"
+                : "library-mode-btn"
+            }
+            onClick={() => onOpenHistory("recent")}
+            aria-pressed={historyView?.kind === "recent"}
+            disabled={historyLoading !== null}
+            title={t("library.recentlyPlayed")}
+          >
+            <History size={14} />
+            <span>{t("library.recentlyPlayed")}</span>
+          </button>
+          <button
+            type="button"
+            className={
+              historyView?.kind === "most"
+                ? "library-mode-btn library-mode-active"
+                : "library-mode-btn"
+            }
+            onClick={() => onOpenHistory("most")}
+            aria-pressed={historyView?.kind === "most"}
+            disabled={historyLoading !== null}
+            title={t("library.mostPlayed")}
+          >
+            <TrendingUp size={14} />
+            <span>{t("library.mostPlayed")}</span>
+          </button>
+        </div>
+
+        {historyView !== null ? (
+          <section className="library-history" aria-label={historyView.kind === "recent" ? t("library.recentlyPlayed") : t("library.mostPlayed")}>
+            <div className="library-history-head">
+              <h3 className="library-history-title">
+                {historyView.kind === "recent" ? t("library.recentlyPlayed") : t("library.mostPlayed")}
+              </h3>
+              <button
+                type="button"
+                className="library-history-close"
+                onClick={() => setHistoryView(null)}
+                aria-label={t("library.historyClose")}
+                title={t("library.historyClose")}
+              >
+                <X size={14} />
+              </button>
+            </div>
+            {historyView.rows.length === 0 ? (
+              <div className="library-empty">{t("library.historyEmpty")}</div>
+            ) : (
+              <ul className="library-history-list">
+                {historyView.kind === "recent"
+                  ? historyView.rows.map((row, i) => (
+                      <li key={`${row.uri}:${row.finishedAt}:${i}`} className="library-history-row">
+                        <span className="library-history-uri">{row.uri}</span>
+                        <span className="library-history-meta">{formatFinishedAt(row.finishedAt)}</span>
+                        <button
+                          type="button"
+                          className="library-history-play"
+                          onClick={() => onPlayHistoryRow(row.uri)}
+                          disabled={busy}
+                          aria-label={t("collection.playNow")}
+                          title={t("collection.playNow")}
+                        >
+                          <Play size={14} />
+                        </button>
+                      </li>
+                    ))
+                  : historyView.rows.map((row) => (
+                      <li key={row.uri} className="library-history-row">
+                        <span className="library-history-uri">{row.uri}</span>
+                        <span className="library-history-meta">{tn("library.playCount", row.count)}</span>
+                        <button
+                          type="button"
+                          className="library-history-play"
+                          onClick={() => onPlayHistoryRow(row.uri)}
+                          disabled={busy}
+                          aria-label={t("collection.playNow")}
+                          title={t("collection.playNow")}
+                        >
+                          <Play size={14} />
+                        </button>
+                      </li>
+                    ))}
+              </ul>
+            )}
+          </section>
+        ) : null}
+        {/* end library-history */}
 
         <div className="library-breadcrumb">
           <span className="library-breadcrumb-label">{t("library.browsing")}</span>
@@ -1460,6 +1976,11 @@ export function LibrarySurface({
                   viewMode={viewMode}
                   busy={busy}
                   onOpen={() => openDrill(browseMode as FacetKind, entry.value)}
+                  onForget={
+                    browseMode === "album"
+                      ? () => onForgetAlbum(entry)
+                      : undefined
+                  }
                   onQueue={(mode) =>
                     onFacetQueue(
                       browseMode as FacetKind,
@@ -1743,16 +2264,67 @@ export function LibrarySurface({
           onConfirm={() => {
             const target = removeTarget;
             setRemoveTarget(null);
-            if (target.kind === "local_usb") {
-              void startUsbRemove(target);
-              return;
-            }
-            void runAction(
-              t("library.removeAction", { name: target.displayName }),
-              async () => {
-              const r = await library.removeSource(target.id);
-              if (r.ok) return { ok: true };
-              return { ok: false, message: r.message };
+            void admitRemove().then((admitted) => {
+              if (!admitted) return;
+              if (target.kind === "local_usb") {
+                void startUsbRemove(target);
+                return;
+              }
+              void runAction(
+                t("library.removeAction", { name: target.displayName }),
+                async () => {
+                const r = await library.removeSource(target.id);
+                if (r.ok) return { ok: true };
+                if (isHouseholdLocked(r)) {
+                  if (household !== null) household.open();
+                  return { ok: false, message: t("household.locked.body") };
+                }
+                return { ok: false, message: r.message };
+              });
+            });
+          }}
+        />
+      ) : null}
+
+      {forgetTarget !== null ? (
+        <ConfirmDialog
+          title={t("library.forgetTitle")}
+          message={t("library.forgetMessage", {
+            name: forgetTarget.title ?? forgetTarget.name
+          })}
+          confirmLabel={t("library.forget")}
+          destructive
+          onCancel={() => setForgetTarget(null)}
+          onConfirm={() => {
+            const target = forgetTarget;
+            setForgetTarget(null);
+            void runAction(t("library.forgetAction"), async () => {
+              const r = await library.forgetTrack(target.uri);
+              if (!r.ok) return { ok: false, message: r.message };
+              dropForgottenUri(target.uri);
+              return { ok: true };
+            });
+          }}
+        />
+      ) : null}
+
+      {forgetAlbumTarget !== null ? (
+        <ConfirmDialog
+          title={t("library.forgetAlbumTitle")}
+          message={t("library.forgetAlbumMessage", {
+            name: forgetAlbumTarget.entry.value
+          })}
+          confirmLabel={t("library.forgetAlbum")}
+          destructive
+          onCancel={() => setForgetAlbumTarget(null)}
+          onConfirm={() => {
+            const target = forgetAlbumTarget;
+            setForgetAlbumTarget(null);
+            void runAction(t("library.forgetAlbumAction"), async () => {
+              const r = await library.forgetAlbum(target.entry);
+              if (!r.ok) return { ok: false, message: r.message };
+              dropForgottenAlbum(target);
+              return { ok: true };
             });
           }}
         />

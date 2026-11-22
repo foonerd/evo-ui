@@ -24,8 +24,15 @@ import {
 import {
   addToPlaylistPayload,
   moveInPlaylistPayload,
-  removeFromPlaylistPayload
+  removeFromPlaylistPayload,
+  duplicatePlaylistPayload
 } from "./playlist-payloads";
+import { importFilePayload, type ImportFormat } from "./playlist-import";
+import {
+  decodeExportReport,
+  exportFilePayload,
+  type ExportReport
+} from "./playlist-export";
 
 const PLAYLIST_SHELF = "audio.playlist";
 const PAYLOAD_VERSION = 1;
@@ -88,6 +95,24 @@ export interface UsePlaylistsState {
     playlistName: string,
     fromPosition: number,
     toPosition: number
+  ) => Promise<PlaylistVerbResult>;
+  /** Import a playlist file the glass has read: one write with the
+   *  file's text inline. The plugin stores it; nothing is loaded onto
+   *  the queue. */
+  importFile: (
+    name: string,
+    format: ImportFormat,
+    content: string
+  ) => Promise<PlaylistVerbResult>;
+  /** Read a stored playlist back as file text (.m3u by the plugin's
+   *  default) with a name to save it under. A read; the device writes
+   *  nothing. The surface offers the answer as a browser download. */
+  exportFile: (name: string) => Promise<PlaylistVerbResult<ExportReport>>;
+  /** Copy a stored playlist into a new one under a name the operator
+   *  typed. The source is read, never written; rename stays rename. */
+  duplicatePlaylist: (
+    source: string,
+    target: string
   ) => Promise<PlaylistVerbResult>;
 }
 
@@ -373,6 +398,42 @@ export function usePlaylists(): UsePlaylistsState {
     [dispatchVoid]
   );
 
+  const importFile = useCallback(
+    (name: string, format: ImportFormat, content: string) =>
+      dispatchVoid("playlist.import_file", importFilePayload(name, format, content)),
+    [dispatchVoid]
+  );
+
+  const exportFile = useCallback(
+    async (name: string): Promise<PlaylistVerbResult<ExportReport>> => {
+      const transport = transportRef.current;
+      if (transport === null) {
+        return { ok: false, message: t("playlist.notConnected") };
+      }
+      const result = await pluginRequest(
+        transport,
+        PLAYLIST_SHELF,
+        "playlist.export_file",
+        { v: PAYLOAD_VERSION, ...exportFilePayload(name) }
+      );
+      if (result.error !== undefined) {
+        return { ok: false, message: errorMessage(result.error) };
+      }
+      const decoded = decodeExportReport(result.value);
+      if (decoded === null) {
+        return { ok: false, message: t("playlist.downloadUnusable") };
+      }
+      return { ok: true, value: decoded };
+    },
+    []
+  );
+
+  const duplicatePlaylist = useCallback(
+    (source: string, target: string) =>
+      dispatchVoid("playlist.duplicate", duplicatePlaylistPayload(source, target)),
+    [dispatchVoid]
+  );
+
   return {
     connection,
     index,
@@ -385,6 +446,9 @@ export function usePlaylists(): UsePlaylistsState {
     saveSelection,
     saveSelectionContainer,
     removeFromPlaylist,
-    moveInPlaylist
+    moveInPlaylist,
+    importFile,
+    exportFile,
+    duplicatePlaylist
   };
 }

@@ -99,9 +99,22 @@ export interface NowPlaying {
   volume: number;
   muted: boolean;
   repeat: boolean;
+  /** MPD's random flag. True can only be track shuffle; false is off OR
+   *  album shuffle (album order is written into the queue, not random).
+   *  Never the album mode on its own. */
   shuffle: boolean;
+  /** The shuffle mode the player reports (shuffle_mode): off, tracks,
+   *  albums or similar. null when the player has not reported it. */
+  shuffleMode: ShuffleMode | null;
   single: boolean;
   consume: boolean;
+}
+
+export type ShuffleMode = "off" | "tracks" | "albums" | "similar";
+
+function shuffleModeField(o: Record<string, unknown>, k: string): ShuffleMode | null {
+  const v = o[k];
+  return v === "off" || v === "tracks" || v === "albums" || v === "similar" ? v : null;
 }
 
 /** Decode one now_playing track value. Returns null when the value
@@ -145,6 +158,7 @@ export function decodeNowPlaying(raw: unknown): NowPlaying | null {
     muted: boolField(raw, "muted"),
     repeat: boolField(raw, "repeat"),
     shuffle: boolField(raw, "shuffle"),
+    shuffleMode: shuffleModeField(raw, "shuffle_mode"),
     single: boolField(raw, "single"),
     consume: boolField(raw, "consume")
   };

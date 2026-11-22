@@ -1,8 +1,8 @@
 // useSmbServer - the device's own SMB file server (networking.shares
 // shelf, smb_server.* verbs). get_state is capability-none; apply /
-// user_add / user_revoke are step-up gated on network_admin, so they
-// ride the paired bearer (inline pairing mints it) exactly like the
-// share-consumer mutations. Passwords never ride the wire - user_add
+// user_add / user_revoke gate at write:network_admin, with the
+// household policy as the door on top, and ride the paired bearer
+// (inline pairing mints it) exactly like the share-consumer mutations. Passwords never ride the wire - user_add
 // carries a credential_key the device resolves from the vault.
 
 import { useCallback } from "preact/hooks";
@@ -51,7 +51,7 @@ export interface UseSmbServerState {
     extra?: Record<string, unknown>
   ) => Promise<SubjectVerbResult>;
   revokeUser: (username: string, extra?: Record<string, unknown>) => Promise<SubjectVerbResult>;
-  /** Rebuild the bearer socket after inline pairing (network_admin). */
+  /** Rebuild the bearer socket after inline pairing. */
   reauth: () => void;
 }
 

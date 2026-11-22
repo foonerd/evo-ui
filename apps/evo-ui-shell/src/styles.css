@@ -1175,6 +1175,26 @@ body {
 /* Engaged state for the shuffle / repeat toggles. The icon does
  * not change shape, so an off vs on mode reads only from colour:
  * the accent tint marks the mode as active. */
+/* Shuffle by album: the same icon, with a small mode mark in the corner
+   so by-track and by-album read apart at a glance. The button is the
+   positioning box for it. */
+.playback-transport-icon[data-shuffle-mode] {
+  position: relative;
+}
+.playback-transport-badge {
+  position: absolute;
+  right: -0.15rem;
+  bottom: -0.2rem;
+  font-size: 0.5rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  padding: 0.1rem 0.2rem;
+  border-radius: 0.3rem;
+  background: #00d4aa;
+  color: #041615;
+}
+
 .playback-transport-icon-active {
   color: #00d4aa;
   border-color: color-mix(in oklab, #00d4aa 55%, transparent);
@@ -6567,6 +6587,278 @@ button.list-aa:not([data-mode="system"]) {
   color: var(--accent, #4dd0e1);
   border-color: color-mix(in srgb, var(--accent, #4dd0e1) 40%, transparent);
 }
+/* Zones (G3): the zone list under the named outputs; membership picked
+   from the named outputs on screen. */
+.audio-zone-choices {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+.audio-zone-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: calc((0.82rem) * var(--type-scale, 1));
+}
+.audio-zone-eq {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-soft, rgba(255, 255, 255, 0.08));
+}
+.audio-zone-eq-bands {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+.audio-zone-eq-band {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+.audio-zone-eq-band-name {
+  min-width: 5.5ch;
+  color: var(--muted-foreground);
+  font-size: calc((0.78rem) * var(--type-scale, 1));
+}
+.audio-zone-eq-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: calc((0.78rem) * var(--type-scale, 1));
+}
+.audio-zone-eq-field input[type="number"] {
+  width: 6.5ch;
+}
+.audio-zone-no-choices {
+  color: var(--muted-foreground);
+  font-size: calc((0.8rem) * var(--type-scale, 1));
+}
+
+/* Per-output controls (G1): one row per listed output under the picker. */
+.audio-output-rows {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.audio-output-row {
+  padding: 8px 0;
+  border-top: 1px solid var(--border-soft, rgba(255, 255, 255, 0.06));
+}
+.audio-output-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.audio-output-row-label {
+  font-size: calc((0.9rem) * var(--type-scale, 1));
+}
+.audio-output-row-id,
+.audio-output-row-status {
+  color: var(--muted-foreground);
+  font-size: calc((0.78rem) * var(--type-scale, 1));
+}
+.audio-output-row-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.audio-output-row-volume {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: calc((0.8rem) * var(--type-scale, 1));
+}
+.audio-output-row-volume input[type="range"] {
+  width: 140px;
+}
+.audio-output-row-volume-value {
+  min-width: 2.5ch;
+  text-align: right;
+}
+/* Named outputs (G2): one list of names under the physical rows, with
+   an Add line and Update / Remove on each named row. */
+.audio-named-outputs {
+  margin-top: 10px;
+}
+.audio-named-outputs-empty {
+  margin: 6px 0 0;
+  color: var(--muted-foreground);
+  font-size: calc((0.8rem) * var(--type-scale, 1));
+}
+.audio-named-output-rows {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.audio-named-output-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-soft, rgba(255, 255, 255, 0.06));
+}
+.audio-named-output-name {
+  font-size: calc((0.9rem) * var(--type-scale, 1));
+}
+.audio-named-output-target,
+.audio-named-output-id {
+  color: var(--muted-foreground);
+  font-size: calc((0.78rem) * var(--type-scale, 1));
+}
+.audio-named-output-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
+.audio-named-output-edit,
+.audio-named-output-add {
+  width: 100%;
+  margin-top: 6px;
+}
+
+/* Forget album: one small control beside the album tile's kebab. */
+.facet-tile-forget {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.08));
+  border-radius: 999px;
+  cursor: pointer;
+}
+.facet-tile-forget:hover {
+  color: var(--foreground);
+}
+
+/* Library search: one field above the browse modes, results below it. */
+.library-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 0 10px;
+}
+.library-search-label {
+  color: var(--muted-foreground);
+  font-size: calc((0.82rem) * var(--type-scale, 1));
+}
+.library-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.35rem 0.7rem;
+  background: transparent;
+  color: var(--foreground);
+  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.08));
+  border-radius: 999px;
+  font-size: calc((0.85rem) * var(--type-scale, 1));
+}
+.library-suggestions {
+  list-style: none;
+  margin: -4px 0 10px;
+  padding: 4px 0;
+  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.08));
+  border-radius: 10px;
+}
+.library-suggestion {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--foreground);
+  border: 0;
+  cursor: pointer;
+  font-size: calc((0.85rem) * var(--type-scale, 1));
+}
+.library-suggestion:hover {
+  background: color-mix(in srgb, var(--accent, #4dd0e1) 12%, transparent);
+}
+.library-search-results {
+  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.08));
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin: 0 0 12px;
+}
+.library-search-stale {
+  margin: 6px 0 0;
+  color: var(--muted-foreground);
+  font-size: calc((0.8rem) * var(--type-scale, 1));
+}
+
+/* Play history (Recently played / Most played): two pills beside the
+   browse modes and a ruled list of what the answer carries. */
+.library-history-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 0 10px;
+}
+.library-history {
+  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.08));
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin: 0 0 12px;
+}
+.library-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.library-history-title {
+  margin: 0;
+  font-size: calc((0.9rem) * var(--type-scale, 1));
+}
+.library-history-close,
+.library-history-play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.08));
+  border-radius: 999px;
+  cursor: pointer;
+}
+.library-history-close:hover,
+.library-history-play:hover {
+  color: var(--foreground);
+}
+.library-history-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.library-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border-soft, rgba(255, 255, 255, 0.06));
+}
+.library-history-uri {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc((0.85rem) * var(--type-scale, 1));
+}
+.library-history-meta {
+  color: var(--muted-foreground);
+  font-size: calc((0.78rem) * var(--type-scale, 1));
+  white-space: nowrap;
+}
+
 /* Facet value tiles (artist/album/genre/year). Fully clickable; drill
    into the value. Album carries a cover, artist a resolved image, the
    abstract facets an icon. */
@@ -6674,6 +6966,9 @@ button.list-aa:not([data-mode="system"]) {
   top: 6px;
   right: 6px;
   z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .library-breadcrumb {

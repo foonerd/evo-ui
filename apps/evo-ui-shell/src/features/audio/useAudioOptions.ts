@@ -44,12 +44,69 @@ import {
   type TestToneChannel,
   type AudioOptionsSettings,
   type AlsaOutput,
+  type CompositionMode,
   type ResamplingPolicy,
   type MixerType,
   type MixerTransitionPhase,
   type VerifyInstallReport,
-  type VolumeCurve
+  type VolumeCurve,
+  type VolumeNormalizationMode
 } from "./audio-options-decoders";
+import {
+  OUTPUT_VERBS,
+  decodeOutputState,
+  outputPayload,
+  outputVolumePayload,
+  type OutputState,
+  type OutputPayload,
+  type OutputVolumePayload
+} from "./output-verbs";
+import {
+  LOGICAL_OUTPUT_VERBS,
+  decodeLogicalOutputAnswer,
+  decodeLogicalOutputList,
+  withAdded,
+  withUpdated,
+  withRemoved,
+  type LogicalOutput,
+  type AddLogicalOutputPayload,
+  type UpdateLogicalOutputPayload,
+  type RemoveLogicalOutputPayload
+} from "./logical-output-verbs";
+import {
+  ZONES_SHELF,
+  ZONE_VERBS,
+  decodeZoneAnswer,
+  decodeZoneList,
+  withZoneAdded,
+  withZoneRemoved,
+  withZoneUpdated,
+  type AddZonePayload,
+  type RemoveZonePayload,
+  type UpdateZonePayload,
+  type Zone,
+  type ZoneEqBandPayload,
+  type ZoneEqEngagedPayload
+} from "./zone-verbs";
+import { sleepTimerPayload } from "./sleep-timer";
+import {
+  ALARM_SHELF,
+  ALARM_VERBS,
+  decodeAlarmAnswer,
+  decodeAlarmCleared,
+  type Alarm,
+  type AlarmSetPayload
+} from "./alarm";
+import {
+  SCENE_VERBS,
+  decodeSceneAnswer,
+  decodeSceneList,
+  withSceneRecalled,
+  withSceneRemoved,
+  withSceneSaved,
+  type Scene,
+  type SceneNamePayload
+} from "./scene-verbs";
 import {
   eqBandToPayload,
   eqBandToWire,
@@ -79,6 +136,32 @@ export interface AudioConnectionState {
  *  operator-facing. */
 export type AudioSetterResult =
   | { ok: true }
+  | { ok: false; message: string };
+
+/** Result of one per-output verb: that output's answered state. */
+export type OutputVerbResult =
+  | { ok: true; value: OutputState }
+  | { ok: false; message: string };
+
+/** Result of one named-output verb: the row it made, changed, or took
+ *  away. */
+export type ZoneVerbResult =
+  | { ok: true; value: Zone }
+  | { ok: false; message: string };
+
+/** Result of one scene verb: the scene it stored, recalled, or took
+ *  away. */
+export type SceneVerbResult =
+  | { ok: true; value: Scene }
+  | { ok: false; message: string };
+
+/** Result of one alarm verb: the decoded answer. */
+export type AlarmVerbResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; message: string };
+
+export type LogicalOutputVerbResult =
+  | { ok: true; value: LogicalOutput }
   | { ok: false; message: string };
 
 /** Result of the verify_install self-test. */
@@ -139,11 +222,26 @@ export interface AudioOptionsState {
   /** Toggle bit-perfect DoP (DSD over PCM). */
   setDop: (value: boolean) => Promise<AudioSetterResult>;
   /** Toggle volume normalization. */
-  setVolumeNormalization: (value: boolean) => Promise<AudioSetterResult>;
+  /** Set the ReplayGain mode (options.set_volume_normalization, payload
+   *  { v, mode }): disabled, track or album. One write; the re-read is
+   *  a read on the seed socket. */
+  setVolumeNormalization: (mode: VolumeNormalizationMode) => Promise<AudioSetterResult>;
   /** Toggle exclusive (hog) device mode. The framework setter
    *  refuses when the active delivery plugin is not bit-perfect
    *  capable; the refusal surfaces as `ok: false`. */
   setExclusiveMode: (value: boolean) => Promise<AudioSetterResult>;
+  /** Arm the sleep timer (options.set_sleep_timer { v, seconds,
+   *  fade_ms }) - one write on audio.options, not through dispatchSetter
+   *  and not the crossfade. Whole numbers zero or greater; anything else
+   *  is refused before a send. seconds 0 with fade_ms 0 cancels. The
+   *  timer is not in the settings and is never read back. */
+  setSleepTimer: (seconds: number, fadeMs: number) => Promise<AudioSetterResult>;
+  /** Set the one alarm (alarm.set { v, weekdays, time, playlist_name } on
+   *  audio.alarm); the answer is the alarm as set. Not dispatchSetter,
+   *  not the sleep timer. There is no read of the alarm. */
+  setAlarm: (payload: AlarmSetPayload) => Promise<AlarmVerbResult<Alarm>>;
+  /** Clear the alarm (alarm.clear { v } on audio.alarm). */
+  clearAlarm: () => Promise<AlarmVerbResult<true>>;
   /** Set the between-track crossfade duration in seconds (0..=30;
    *  0 disables). */
   setCrossfadeSeconds: (value: number) => Promise<AudioSetterResult>;
@@ -157,13 +255,69 @@ export interface AudioOptionsState {
   setEqBand: (index: number, band: EqBand) => Promise<AudioSetterResult>;
   /** Select the composition mode - true selects eq_only, false
    *  passthrough. eq_only is refused on an unsupported format; the
-   *  refusal reason rides the outcome. eqModeActive updates on a
-   *  successful select. */
+   *  refusal reason rides the outcome. A successful select re-reads
+   *  settings so eqMode follows the device, not the request. */
   selectEqMode: (on: boolean) => Promise<SelectModeOutcome>;
-  /** True when this session has selected eq_only. Optimistic - the
-   *  framework exposes no composition-mode read; false on mount
-   *  (the plugin defaults to passthrough at load). */
-  eqModeActive: boolean;
+  /** The device's composition mode from options.settings
+   *  (composition_mode): "eq_only", "passthrough", or null while the
+   *  player has not reported it. Read at mount and on every changed
+   *  happening; never a session guess. */
+  eqMode: CompositionMode | null;
+  /** Per-output verbs on the audio.delivery shelf, one write each with
+   *  that row's hw:N,M id. Each answers that output's state and the
+   *  caller paints that output only. Not the picker (options.
+   *  set_output_device) and not the global volume. */
+  enableOutput: (outputId: string) => Promise<OutputVerbResult>;
+  disableOutput: (outputId: string) => Promise<OutputVerbResult>;
+  playOutput: (outputId: string) => Promise<OutputVerbResult>;
+  pauseOutput: (outputId: string) => Promise<OutputVerbResult>;
+  /** 0 through 100, whole numbers; anything else is refused on the
+   *  glass before a send. */
+  setOutputVolume: (outputId: string, volume: number) => Promise<OutputVerbResult>;
+  /** Named outputs from delivery.list_logical_outputs, in the answer's
+   *  order. Read once, with the list that opened the stage, with { v }
+   *  and nothing else. Empty until that read, or when the answer is
+   *  empty. Never re-read: each write below answers the row it touched
+   *  and this list becomes that answer. */
+  logicalOutputs: ReadonlyArray<LogicalOutput>;
+  /** The three named-output verbs (G2) on the audio.delivery shelf, one
+   *  write each with the helper's payload and nothing else. Each answers
+   *  the row it made, changed, or took away, and the list above becomes
+   *  that answer: appended, replaced by id, or dropped by id. Not the
+   *  picker, not the five physical-row verbs, not a volume. */
+  addLogicalOutput: (payload: AddLogicalOutputPayload) => Promise<LogicalOutputVerbResult>;
+  updateLogicalOutput: (payload: UpdateLogicalOutputPayload) => Promise<LogicalOutputVerbResult>;
+  removeLogicalOutput: (payload: RemoveLogicalOutputPayload) => Promise<LogicalOutputVerbResult>;
+  /** Zones from zone.list on shelf audio.zones, in the answer's order.
+   *  Read once at connect with { v } and nothing else; never re-read -
+   *  each zone write answers the zone it touched and this list becomes
+   *  that answer. */
+  zones: ReadonlyArray<Zone>;
+  /** The three zone verbs (G3) on shelf audio.zones, one write each
+   *  with the helper's payload and nothing else: appended, replaced by
+   *  id, or dropped by id on the answer. Not a delivery verb. */
+  addZone: (payload: AddZonePayload) => Promise<ZoneVerbResult>;
+  updateZone: (payload: UpdateZonePayload) => Promise<ZoneVerbResult>;
+  removeZone: (payload: RemoveZonePayload) => Promise<ZoneVerbResult>;
+  /** The zone's own stored EQ (G3): zone.set_eq_engaged { id, engaged }
+   *  and zone.set_eq_band { id, index, freq_hz, gain_db, q }, both on
+   *  the same zoneVerb site on audio.zones; the answer replaces that
+   *  zone by id. Not the global EQ on audio.options; selects no
+   *  composition mode. */
+  setZoneEqEngaged: (payload: ZoneEqEngagedPayload) => Promise<ZoneVerbResult>;
+  setZoneEqBand: (payload: ZoneEqBandPayload) => Promise<ZoneVerbResult>;
+  /** Scene names from scene.list on shelf audio.zones, in the answer's
+   *  order. Read once at connect, after zone.list, with { v } and nothing
+   *  else; never re-read - each scene write answers its scene and this
+   *  list becomes that answer. */
+  scenes: ReadonlyArray<string>;
+  /** The three scene verbs (G3) on shelf audio.zones, one write each
+   *  with { name }. Save and remove leave the zones on screen; recall
+   *  sets them to the answered scene's zones, in that order, without
+   *  reading zone.list again. A scene does not play. */
+  saveScene: (payload: SceneNamePayload) => Promise<SceneVerbResult>;
+  recallScene: (payload: SceneNamePayload) => Promise<SceneVerbResult>;
+  removeScene: (payload: SceneNamePayload) => Promise<SceneVerbResult>;
   /** Read the named-EQ-preset library (options.list_eq_presets). */
   listEqPresets: () => Promise<ReadonlyArray<EqPreset>>;
   /** Save the current bands under a name (options.save_eq_preset).
@@ -257,9 +411,13 @@ export function useAudioOptions(): AudioOptionsState {
   const [alsaOutputs, setAlsaOutputs] = useState<ReadonlyArray<AlsaOutput>>(
     []
   );
+  const [logicalOutputs, setLogicalOutputs] = useState<ReadonlyArray<LogicalOutput>>(
+    []
+  );
+  const [zones, setZones] = useState<ReadonlyArray<Zone>>([]);
+  const [scenes, setScenes] = useState<ReadonlyArray<string>>([]);
   const [transitionPhase, setTransitionPhase] =
     useState<MixerTransitionPhase>(IDLE_TRANSITION);
-  const [eqModeActive, setEqModeActive] = useState(false);
   const transportRef = useRef<WsTransport | null>(null);
 
   const dismissTransition = useCallback(() => {
@@ -308,6 +466,61 @@ export function useAudioOptions(): AudioOptionsState {
     []
   );
 
+  // Read the named outputs once, with the list that opened the stage:
+  // { v } and nothing else, shown in the answer's order. This is the
+  // only read of them. Each named-output write answers the row it
+  // touched and the list becomes that answer, so there is no second
+  // read. Failure leaves the list empty.
+  const readLogicalOutputs = useCallback(
+    async (transport: WsTransport): Promise<void> => {
+      const result = await pluginRequest(
+        transport,
+        DELIVERY_SHELF,
+        LOGICAL_OUTPUT_VERBS.list,
+        { v: PAYLOAD_VERSION }
+      );
+      if (result.error !== undefined) return;
+      setLogicalOutputs(decodeLogicalOutputList(result.value));
+    },
+    []
+  );
+
+  // Read the zones once at connect, on shelf audio.zones: { v } and
+  // nothing else, shown in the answer's order. This is the only list.
+  // Each zone write answers the zone it touched and the list becomes
+  // that answer, so there is no second list. Failure leaves it empty.
+  const readZones = useCallback(
+    async (transport: WsTransport): Promise<void> => {
+      const result = await pluginRequest(
+        transport,
+        ZONES_SHELF,
+        ZONE_VERBS.list,
+        { v: PAYLOAD_VERSION }
+      );
+      if (result.error !== undefined) return;
+      setZones(decodeZoneList(result.value));
+    },
+    []
+  );
+
+  // Read the scene names once at connect, after zone.list, on shelf
+  // audio.zones: { v } and nothing else, shown in the answer's order. An
+  // empty answer is an empty list; failure leaves it empty. Each scene
+  // write answers its scene, so there is no second read.
+  const readScenes = useCallback(
+    async (transport: WsTransport): Promise<void> => {
+      const result = await pluginRequest(
+        transport,
+        ZONES_SHELF,
+        SCENE_VERBS.list,
+        { v: PAYLOAD_VERSION }
+      );
+      if (result.error !== undefined) return;
+      setScenes(decodeSceneList(result.value));
+    },
+    []
+  );
+
   useEffect(() => {
     if (typeof WebSocket === "undefined") {
       setConnection({ kind: "error", reason: "WebSocket unavailable" });
@@ -332,6 +545,12 @@ export function useAudioOptions(): AudioOptionsState {
         await refreshSettings(transport);
         if (cancelled) return;
         await refreshOutputDevices(transport);
+        if (cancelled) return;
+        await readLogicalOutputs(transport);
+        if (cancelled) return;
+        await readZones(transport);
+        if (cancelled) return;
+        await readScenes(transport);
         if (cancelled) return;
 
         // Happening handler: route mixer-transition lifecycle
@@ -398,9 +617,9 @@ export function useAudioOptions(): AudioOptionsState {
       void transport.close();
       transportRef.current = null;
     };
-    // refreshSettings + refreshOutputDevices are stable (useCallback
-    // with empty deps).
-  }, [refreshSettings, refreshOutputDevices]);
+    // refreshSettings, refreshOutputDevices and readLogicalOutputs are
+    // stable (useCallback with empty deps).
+  }, [refreshSettings, refreshOutputDevices, readLogicalOutputs]);
 
   // The write socket for a session with a stored bearer. Opened lazily
   // on the first bearer write, reads the bearer at every handshake, and
@@ -523,10 +742,24 @@ export function useAudioOptions(): AudioOptionsState {
     (value: boolean) => dispatchSetter("options.set_dop", value),
     [dispatchSetter]
   );
+  // ReplayGain is a mode, not a switch: the payload carries `mode`, not
+  // the generic `value` envelope, so this verb does not go through
+  // dispatchSetter. Same shape otherwise: one write, then a seed re-read.
   const setVolumeNormalization = useCallback(
-    (value: boolean) =>
-      dispatchSetter("options.set_volume_normalization", value),
-    [dispatchSetter]
+    async (mode: VolumeNormalizationMode): Promise<AudioSetterResult> => {
+      const result = await writeRequest(
+        OPTIONS_SHELF,
+        "options.set_volume_normalization",
+        { v: PAYLOAD_VERSION, mode }
+      );
+      if (result.error !== undefined) {
+        return { ok: false, message: errorMessage(result.error) };
+      }
+      const seed = transportRef.current;
+      if (seed !== null) await refreshSettings(seed);
+      return { ok: true };
+    },
+    [writeRequest, refreshSettings]
   );
   const setExclusiveMode = useCallback(
     (value: boolean) => dispatchSetter("options.set_exclusive_mode", value),
@@ -580,16 +813,267 @@ export function useAudioOptions(): AudioOptionsState {
         return { ok: false, reason: errorMessage(result.error) };
       }
       const outcome = decodeSelectModeOutcome(result.value);
-      if (outcome.ok) setEqModeActive(on);
+      if (outcome.ok) {
+        // The flag is the device's: re-read settings on the seed
+        // socket so composition_mode arrives from the player.
+        const seed = transportRef.current;
+        if (seed !== null) await refreshSettings(seed);
+      }
       return outcome;
     },
-    [writeRequest]
+    [writeRequest, refreshSettings]
   );
 
   // EQ preset library verbs on the audio.options shelf. recall
   // emits a single audio.options.changed (field eq_bands), which
   // the happening handler already routes into a settings re-read,
   // so the recalled curve flows back without an extra fetch here.
+  // The five per-output verbs (G1): one write site on the delivery
+  // shelf, the versioned envelope around the helper's payload, the
+  // answer decoded to that output's state. No options re-read: the
+  // options settings did not change.
+  const outputVerb = useCallback(
+    async (
+      requestType: string,
+      payload: OutputPayload | OutputVolumePayload
+    ): Promise<OutputVerbResult> => {
+      const result = await writeRequest(DELIVERY_SHELF, requestType, {
+        v: PAYLOAD_VERSION,
+        ...payload
+      });
+      if (result.error !== undefined) {
+        return { ok: false, message: errorMessage(result.error) };
+      }
+      const decoded = decodeOutputState(result.value);
+      if (decoded === null) {
+        return { ok: false, message: "The output system answered with nothing the glass can paint." };
+      }
+      return { ok: true, value: decoded };
+    },
+    [writeRequest]
+  );
+  const enableOutput = useCallback(
+    (outputId: string) => outputVerb(OUTPUT_VERBS.enable, outputPayload(outputId)),
+    [outputVerb]
+  );
+  const disableOutput = useCallback(
+    (outputId: string) => outputVerb(OUTPUT_VERBS.disable, outputPayload(outputId)),
+    [outputVerb]
+  );
+  const playOutput = useCallback(
+    (outputId: string) => outputVerb(OUTPUT_VERBS.play, outputPayload(outputId)),
+    [outputVerb]
+  );
+  const pauseOutput = useCallback(
+    (outputId: string) => outputVerb(OUTPUT_VERBS.pause, outputPayload(outputId)),
+    [outputVerb]
+  );
+  const setOutputVolume = useCallback(
+    async (outputId: string, volume: number): Promise<OutputVerbResult> => {
+      const payload = outputVolumePayload(outputId, volume);
+      if (payload === null) {
+        return { ok: false, message: "Volume must be a whole number from 0 to 100." };
+      }
+      return outputVerb(OUTPUT_VERBS.volume, payload);
+    },
+    [outputVerb]
+  );
+
+  // The three named-output verbs (G2): one write site on the delivery
+  // shelf, the versioned envelope around the helper's payload, the
+  // answer decoded to the row it names, and the list on screen made
+  // that answer - appended, replaced by id, or dropped by id. No second
+  // read and no options re-read: the physical rows did not change and
+  // the options settings did not change.
+  const logicalOutputVerb = useCallback(
+    async (
+      requestType: string,
+      payload: AddLogicalOutputPayload | UpdateLogicalOutputPayload | RemoveLogicalOutputPayload,
+      apply: (list: ReadonlyArray<LogicalOutput>, row: LogicalOutput) => ReadonlyArray<LogicalOutput>
+    ): Promise<LogicalOutputVerbResult> => {
+      const result = await writeRequest(DELIVERY_SHELF, requestType, {
+        v: PAYLOAD_VERSION,
+        ...payload
+      });
+      if (result.error !== undefined) {
+        return { ok: false, message: errorMessage(result.error) };
+      }
+      const row = decodeLogicalOutputAnswer(result.value);
+      if (row === null) {
+        return { ok: false, message: "The output system answered with nothing the glass can paint." };
+      }
+      setLogicalOutputs((cur) => apply(cur, row));
+      return { ok: true, value: row };
+    },
+    [writeRequest]
+  );
+  const addLogicalOutput = useCallback(
+    (payload: AddLogicalOutputPayload) => logicalOutputVerb(LOGICAL_OUTPUT_VERBS.add, payload, withAdded),
+    [logicalOutputVerb]
+  );
+  const updateLogicalOutput = useCallback(
+    (payload: UpdateLogicalOutputPayload) => logicalOutputVerb(LOGICAL_OUTPUT_VERBS.update, payload, withUpdated),
+    [logicalOutputVerb]
+  );
+  const removeLogicalOutput = useCallback(
+    (payload: RemoveLogicalOutputPayload) => logicalOutputVerb(LOGICAL_OUTPUT_VERBS.remove, payload, withRemoved),
+    [logicalOutputVerb]
+  );
+
+  // The three zone verbs (G3): one write site on shelf audio.zones, the
+  // versioned envelope around the helper's payload, the answer decoded
+  // to the zone it names, and the list on screen made that answer -
+  // appended, replaced by id, or dropped by id. No second list and no
+  // options re-read. Never on audio.delivery.
+  const zoneVerb = useCallback(
+    async (
+      requestType: string,
+      payload:
+        | AddZonePayload
+        | UpdateZonePayload
+        | RemoveZonePayload
+        | ZoneEqEngagedPayload
+        | ZoneEqBandPayload,
+      apply: (list: ReadonlyArray<Zone>, zone: Zone) => ReadonlyArray<Zone>
+    ): Promise<ZoneVerbResult> => {
+      const result = await writeRequest(ZONES_SHELF, requestType, {
+        v: PAYLOAD_VERSION,
+        ...payload
+      });
+      if (result.error !== undefined) {
+        return { ok: false, message: errorMessage(result.error) };
+      }
+      const zone = decodeZoneAnswer(result.value);
+      if (zone === null) {
+        return { ok: false, message: "The zone system answered with nothing the glass can paint." };
+      }
+      setZones((cur) => apply(cur, zone));
+      return { ok: true, value: zone };
+    },
+    [writeRequest]
+  );
+  const addZone = useCallback(
+    (payload: AddZonePayload) => zoneVerb(ZONE_VERBS.add, payload, withZoneAdded),
+    [zoneVerb]
+  );
+  const updateZone = useCallback(
+    (payload: UpdateZonePayload) => zoneVerb(ZONE_VERBS.update, payload, withZoneUpdated),
+    [zoneVerb]
+  );
+  const removeZone = useCallback(
+    (payload: RemoveZonePayload) => zoneVerb(ZONE_VERBS.remove, payload, withZoneRemoved),
+    [zoneVerb]
+  );
+  const setZoneEqEngaged = useCallback(
+    (payload: ZoneEqEngagedPayload) => zoneVerb(ZONE_VERBS.setEqEngaged, payload, withZoneUpdated),
+    [zoneVerb]
+  );
+  const setZoneEqBand = useCallback(
+    (payload: ZoneEqBandPayload) => zoneVerb(ZONE_VERBS.setEqBand, payload, withZoneUpdated),
+    [zoneVerb]
+  );
+
+  // The three scene verbs (G3): one write site on shelf audio.zones, the
+  // versioned envelope around { name }, the answer decoded to its scene.
+  // A scene whose zones do not all decode is a refusal and nothing is
+  // painted. The names on screen become the answer (saved in place or
+  // appended, dropped, or left as they were); a recall also sets the
+  // zones on screen to the scene's zones, in that order. No zone.list,
+  // no second scene read, no options re-read. Never on audio.delivery or
+  // audio.options.
+  const sceneVerb = useCallback(
+    async (
+      requestType: string,
+      payload: SceneNamePayload,
+      applyNames: (names: ReadonlyArray<string>, scene: Scene) => ReadonlyArray<string>,
+      recall: boolean
+    ): Promise<SceneVerbResult> => {
+      const result = await writeRequest(ZONES_SHELF, requestType, {
+        v: PAYLOAD_VERSION,
+        ...payload
+      });
+      if (result.error !== undefined) {
+        return { ok: false, message: errorMessage(result.error) };
+      }
+      const scene = decodeSceneAnswer(result.value);
+      if (scene === null) {
+        return { ok: false, message: "The zone system answered a scene the glass cannot paint; the zones on screen are unchanged." };
+      }
+      setScenes((cur) => applyNames(cur, scene));
+      if (recall) setZones(scene.zones);
+      return { ok: true, value: scene };
+    },
+    [writeRequest]
+  );
+  const saveScene = useCallback(
+    (payload: SceneNamePayload) => sceneVerb(SCENE_VERBS.save, payload, withSceneSaved, false),
+    [sceneVerb]
+  );
+  const recallScene = useCallback(
+    (payload: SceneNamePayload) => sceneVerb(SCENE_VERBS.recall, payload, withSceneRecalled, true),
+    [sceneVerb]
+  );
+  const removeScene = useCallback(
+    (payload: SceneNamePayload) => sceneVerb(SCENE_VERBS.remove, payload, withSceneRemoved, false),
+    [sceneVerb]
+  );
+
+  // The sleep timer (H2): one write site on audio.options, the versioned
+  // envelope around { seconds, fade_ms }. Not dispatchSetter (whose
+  // { v, value } envelope it is not) and no settings re-read - the timer
+  // is not in the settings. A non-whole or negative number sends nothing.
+  const setSleepTimer = useCallback(
+    async (seconds: number, fadeMs: number): Promise<AudioSetterResult> => {
+      const payload = sleepTimerPayload(seconds, fadeMs);
+      if (payload === null) {
+        return { ok: false, message: "The timer takes whole numbers, zero or greater." };
+      }
+      const result = await writeRequest(OPTIONS_SHELF, "options.set_sleep_timer", {
+        v: PAYLOAD_VERSION,
+        ...payload
+      });
+      if (result.error !== undefined) {
+        return { ok: false, message: errorMessage(result.error) };
+      }
+      return { ok: true };
+    },
+    [writeRequest]
+  );
+
+  // The alarm: one write site on audio.alarm, the versioned envelope
+  // around the helper's payload, the answer decoded by the verb's own
+  // decoder. Not dispatchSetter, no settings re-read, and no read of the
+  // alarm anywhere - the glass shows what a set answered, or nothing.
+  const alarmVerb = useCallback(
+    async <T,>(
+      requestType: string,
+      payload: AlarmSetPayload | Record<string, never>,
+      decode: (raw: unknown) => T | null
+    ): Promise<AlarmVerbResult<T>> => {
+      const result = await writeRequest(ALARM_SHELF, requestType, {
+        v: PAYLOAD_VERSION,
+        ...payload
+      });
+      if (result.error !== undefined) {
+        return { ok: false, message: errorMessage(result.error) };
+      }
+      const value = decode(result.value);
+      if (value === null) {
+        return { ok: false, message: "The alarm answered with nothing the glass can show." };
+      }
+      return { ok: true, value };
+    },
+    [writeRequest]
+  );
+  const setAlarm = useCallback(
+    (payload: AlarmSetPayload) => alarmVerb(ALARM_VERBS.set, payload, decodeAlarmAnswer),
+    [alarmVerb]
+  );
+  const clearAlarm = useCallback(
+    () => alarmVerb(ALARM_VERBS.clear, {}, decodeAlarmCleared),
+    [alarmVerb]
+  );
+
   const listEqPresets = useCallback(async (): Promise<
     ReadonlyArray<EqPreset>
   > => {
@@ -785,11 +1269,33 @@ export function useAudioOptions(): AudioOptionsState {
     setVolumeNormalization,
     setExclusiveMode,
     setCrossfadeSeconds,
+    setSleepTimer,
+    setAlarm,
+    clearAlarm,
     setGapless,
     setEqEngaged,
     setEqBand,
     selectEqMode,
-    eqModeActive,
+    eqMode: settings?.compositionMode ?? null,
+    enableOutput,
+    disableOutput,
+    playOutput,
+    pauseOutput,
+    setOutputVolume,
+    logicalOutputs,
+    addLogicalOutput,
+    updateLogicalOutput,
+    removeLogicalOutput,
+    zones,
+    addZone,
+    updateZone,
+    removeZone,
+    setZoneEqEngaged,
+    setZoneEqBand,
+    scenes,
+    saveScene,
+    recallScene,
+    removeScene,
     listEqPresets,
     saveEqPreset,
     recallEqPreset,

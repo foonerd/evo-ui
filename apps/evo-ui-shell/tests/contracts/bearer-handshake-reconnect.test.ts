@@ -37,6 +37,9 @@ class FakeWebSocket {
   static failNext = 0;
   /** When set, every request frame is answered with this outcome. */
   static autoAnswer: ((op: string) => unknown) | null = null;
+  /** When set, an upgrade presenting this bearer is refused (a dead
+   *  token): the device answers anonymously but not for this token. */
+  static refuseBearer: string | null = null;
 
   public url: string;
   public protocols: string | string[] | undefined;
@@ -48,8 +51,12 @@ class FakeWebSocket {
     this.url = url;
     this.protocols = protocols;
     FakeWebSocket.instances.push(this);
-    const shouldFail = FakeWebSocket.failNext > 0;
-    if (shouldFail) FakeWebSocket.failNext -= 1;
+    const refusedBearer =
+      FakeWebSocket.refuseBearer !== null &&
+      Array.isArray(protocols) &&
+      protocols.includes(`evo.bearer.${FakeWebSocket.refuseBearer}`);
+    const shouldFail = refusedBearer || FakeWebSocket.failNext > 0;
+    if (!refusedBearer && FakeWebSocket.failNext > 0) FakeWebSocket.failNext -= 1;
     queueMicrotask(() => {
       if (shouldFail) {
         this.readyState = FakeWebSocket.CLOSED;
@@ -104,6 +111,7 @@ function withFakeSocket(run: () => Promise<void>): Promise<void> {
   FakeWebSocket.instances = [];
   FakeWebSocket.failNext = 0;
   FakeWebSocket.autoAnswer = null;
+  FakeWebSocket.refuseBearer = null;
   return run().finally(() => {
     (globalThis as { WebSocket?: unknown }).WebSocket = saved;
   });
@@ -252,6 +260,11 @@ test("probe: anon read lands -> purge, announced on the bearer bus", () =>
     });
     try {
       FakeWebSocket.autoAnswer = () => ({ outcome: "ok", value: { granted: [], ok: true } });
+      // Reboot lift (named, with the pairing-across-reboot row): the probe
+      // now re-handshakes the stored bearer once the anonymous read lands,
+      // and purges only when that upgrade is refused. A dead token is one
+      // the device refuses, so the fake refuses it.
+      FakeWebSocket.refuseBearer = "dead";
       const outcome = await probeStaleBearer({
         url: "ws://test",
         read: async (anon) => {
@@ -275,6 +288,9 @@ test("probe: anon read lands -> purge, announced on the bearer bus", () =>
       const sentOps = probeSocket.sent.map((s) => JSON.parse(s) as { op?: string; payload?: unknown });
       assert.deepEqual(sentOps.map((f) => f.op), ["negotiate"]);
       assert.deepEqual(sentOps[0].payload, { capabilities: [] });
+      // The one re-handshake presented the stored token and was refused.
+      assert.deepEqual(FakeWebSocket.instances[1].protocols, ["evo.bearer.dead"]);
+      assert.equal(FakeWebSocket.instances.length, 2);
     } finally {
       off();
       restore();

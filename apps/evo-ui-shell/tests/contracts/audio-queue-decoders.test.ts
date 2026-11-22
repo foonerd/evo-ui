@@ -39,6 +39,9 @@ test("decodeQueueItem decodes a populated item", () => {
     album: "Album A",
     durationMs: 236000,
     artworkUrl: "/art/src-a/album-a.jpg",
+    // Artwork-hash lift (named, with the glass artwork-hash consumer row):
+    // the item now carries the scan-time artwork_hash, null when absent.
+    artworkHash: null,
     available: true,
     classical: null
   });

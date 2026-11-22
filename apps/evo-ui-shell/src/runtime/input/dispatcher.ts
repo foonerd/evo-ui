@@ -48,10 +48,10 @@ export interface VerbDispatcher {
 }
 
 /**
- * Default dispatcher implementation: every verb routes through
- * `client.plugins.courseCorrect`. The target is the audio
- * playback custody for verbs that need a target; search /
- * play_now route through their canonical wire ops.
+ * Default dispatcher implementation: transport verbs route through
+ * `client.plugins.courseCorrect` with the audio playback custody as
+ * target; play_now routes the same way with its uri. Search is not a
+ * steward command and is refused here - the library surface runs it.
  */
 export class SdkVerbDispatcher implements VerbDispatcher {
   public constructor(private readonly client: EvoClient) {}
@@ -137,13 +137,16 @@ async function routeOp(
     case "course_correct":
       return await client.plugins.courseCorrect(payload);
     case "search":
-      // Search routes through course_correct for now; a future
-      // pass projects a dedicated `search_unified` wire op when
-      // the framework's metadata-chain query surface stabilises.
-      return await client.plugins.courseCorrect({
-        verb: "search",
-        ...payload,
-      });
+      // A search utterance is not a steward command. The library
+      // surface owns the search (library.search_library through its
+      // one submit path, with its own voice dispatcher); this shared
+      // dispatcher refuses it rather than send it anywhere.
+      return {
+        error: {
+          code: "search_not_steward",
+          message: "search is run on the library surface, not by the steward",
+        },
+      };
     case "play_now":
       return await client.plugins.courseCorrect({
         verb: "play_now",

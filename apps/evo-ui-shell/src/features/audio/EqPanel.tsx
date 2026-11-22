@@ -6,9 +6,16 @@
 // composition mode, which the framework refuses on an unsupported
 // format - the refusal reason is shown rather than a dead toggle.
 //
-// The named-preset row (save / recall / delete + export / import)
-// is a separate follow-up; the framework preset verbs have landed
-// but are not wired here yet.
+// One gesture, one write. A drag moves the curve locally and writes
+// the band once when the pointer is released; the Q slider writes on
+// release. Every options write is a settings publish the device
+// answers with a pipeline rewrite, so a burst of writes was a burst
+// of rewrites - and a restart storm on the player. Reset to flat is
+// the atomic preset path (save the flat preset, recall it), never ten
+// setters.
+//
+// The EQ-on flag is the hook's session flag until the device exposes
+// a composition-mode read; it is not a substitute for that read.
 
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { EqCurveEditor } from "./EqCurveEditor";
@@ -19,6 +26,7 @@ import {
   type EqPreset,
   type SelectModeOutcome
 } from "./eq-decoders";
+import type { CompositionMode } from "./audio-options-decoders";
 import type { AudioSetterResult } from "./useAudioOptions";
 
 interface EqPanelProps {
@@ -26,8 +34,9 @@ interface EqPanelProps {
   bands: ReadonlyArray<EqBand>;
   /** eq_engaged A/B flag. */
   engaged: boolean;
-  /** True when this session has selected eq_only mode. */
-  modeActive: boolean;
+  /** The device's composition mode from options.settings; null while
+   *  the player has not reported it. */
+  eqMode: CompositionMode | null;
   /** True while a transition / gesture locks the controls. */
   locked: boolean;
   setBand: (index: number, band: EqBand) => Promise<AudioSetterResult>;
@@ -42,13 +51,14 @@ interface EqPanelProps {
   deletePreset: (name: string) => Promise<AudioSetterResult>;
 }
 
-/** Debounce on the per-band set_eq_band dispatch while dragging. */
-const BAND_DISPATCH_DEBOUNCE_MS = 140;
+/** The preset Reset to flat saves and recalls, so the ten bands land in
+ *  one atomic write on the device instead of ten. */
+const FLAT_PRESET_NAME = "Flat";
 
 export function EqPanel({
   bands,
   engaged,
-  modeActive,
+  eqMode,
   locked,
   setBand,
   setEngaged,
@@ -58,6 +68,10 @@ export function EqPanel({
   recallPreset,
   deletePreset
 }: EqPanelProps) {
+  // On means the device says eq_only. An unreported mode is its own
+  // state: the toggle waits rather than claiming off.
+  const modeActive = eqMode === "eq_only";
+  const modeKnown = eqMode !== null;
   const [localBands, setLocalBands] = useState<EqBand[]>(() =>
     bands.map((b) => ({ ...b }))
   );
@@ -65,48 +79,44 @@ export function EqPanel({
   const [modeBusy, setModeBusy] = useState(false);
   const [modeError, setModeError] = useState<string | null>(null);
   const [eqError, setEqError] = useState<string | null>(null);
-  const draggingRef = useRef(false);
-  const timersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(
-    new Map()
-  );
+  // Bands a gesture has moved and not yet written. While any is
+  // outstanding the local curve is the truth; the device's bands are
+  // adopted again once the gesture has been written.
+  const dirtyRef = useRef<Set<number>>(new Set());
+  const localRef = useRef<EqBand[]>(localBands);
+  localRef.current = localBands;
 
-  // Adopt external band changes (settings refresh, reset) unless an
-  // edit is in flight - a drag owns the live band state until its
-  // dispatch debounce settles.
+  // Adopt external band changes (settings refresh, recall) unless a
+  // gesture is in flight - the drag owns the live band state until it
+  // ends and its one write lands.
   useEffect(() => {
-    if (!draggingRef.current) setLocalBands(bands.map((b) => ({ ...b })));
+    if (dirtyRef.current.size === 0) {
+      setLocalBands(bands.map((b) => ({ ...b })));
+    }
   }, [bands]);
 
-  useEffect(() => {
-    const timers = timersRef.current;
-    return () => {
-      for (const t of timers.values()) clearTimeout(t);
-    };
+  // Live value during a gesture: the curve follows, nothing is written.
+  const onBandChange = useCallback((index: number, band: EqBand): void => {
+    dirtyRef.current.add(index);
+    setLocalBands((prev) => {
+      const next = prev.slice();
+      next[index] = band;
+      return next;
+    });
   }, []);
 
-  // A band edit updates local state immediately (smooth curve) and
-  // dispatches set_eq_band debounced, per band.
-  const onBandChange = useCallback(
-    (index: number, band: EqBand): void => {
-      draggingRef.current = true;
-      setLocalBands((prev) => {
-        const next = prev.slice();
-        next[index] = band;
-        return next;
+  // The gesture ended: one set_eq_band for the band it moved. A click
+  // that moved nothing writes nothing.
+  const onBandCommit = useCallback(
+    (index: number): void => {
+      const dirty = dirtyRef.current;
+      if (!dirty.has(index)) return;
+      const band = localRef.current[index];
+      if (band === undefined) return;
+      dirty.delete(index);
+      void setBand(index, band).then((r) => {
+        if (!r.ok) setEqError(r.message);
       });
-      const timers = timersRef.current;
-      const existing = timers.get(index);
-      if (existing !== undefined) clearTimeout(existing);
-      timers.set(
-        index,
-        setTimeout(() => {
-          timers.delete(index);
-          if (timers.size === 0) draggingRef.current = false;
-          void setBand(index, band).then((r) => {
-            if (!r.ok) setEqError(r.message);
-          });
-        }, BAND_DISPATCH_DEBOUNCE_MS)
-      );
     },
     [setBand]
   );
@@ -125,18 +135,25 @@ export function EqPanel({
     if (!r.ok) setEqError(r.message);
   }, [engaged, setEngaged]);
 
+  // Reset to flat through the atomic preset path: save the flat curve
+  // under one name, recall it. Recall applies the ten bands in one
+  // write on the device and one changed happening back. A refused save
+  // (library cap, bad name) is shown; it never falls back to ten setters.
   const onReset = useCallback(async (): Promise<void> => {
     setEqError(null);
     const flat = spreadEqBands();
-    setLocalBands(flat);
-    for (let i = 0; i < flat.length; i++) {
-      const r = await setBand(i, flat[i]);
-      if (!r.ok) {
-        setEqError(r.message);
-        return;
-      }
+    const saved = await savePreset(FLAT_PRESET_NAME, flat);
+    if (!saved.ok) {
+      setEqError(saved.message);
+      return;
     }
-  }, [setBand]);
+    const recalled = await recallPreset(FLAT_PRESET_NAME);
+    if (!recalled.ok) {
+      setEqError(recalled.message);
+      return;
+    }
+    setLocalBands(flat);
+  }, [savePreset, recallPreset]);
 
   return (
     <div className="audio-eq">
@@ -147,10 +164,15 @@ export function EqPanel({
           type="checkbox"
           className="audio-toggle"
           checked={modeActive}
-          disabled={locked || modeBusy}
+          disabled={locked || modeBusy || !modeKnown}
           onChange={() => void onToggleMode()}
         />
       </label>
+      {!modeKnown ? (
+        <p className="audio-stage-note">
+          The player has not reported the EQ mode yet.
+        </p>
+      ) : null}
       {modeError !== null ? (
         <p className="audio-options-hint-warning" role="alert">
           {modeError}
@@ -177,6 +199,7 @@ export function EqPanel({
             disabled={locked}
             onSelect={setSelected}
             onBandChange={onBandChange}
+            onBandCommit={onBandCommit}
           />
           <EqPresetRow
             currentBands={localBands}

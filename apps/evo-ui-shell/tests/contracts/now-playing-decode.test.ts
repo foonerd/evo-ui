@@ -344,6 +344,8 @@ test("LOCK now_playing: transport_state / track / muted decode to exactly these 
     "muted",
     "repeat",
     "shuffle",
+    // A2: the reported shuffle mode rides beside MPD's random flag.
+    "shuffleMode",
     "single",
     "consume"
   ]);

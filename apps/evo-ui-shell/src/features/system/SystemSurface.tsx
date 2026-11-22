@@ -21,6 +21,11 @@ import { CredentialsPanel } from "../credentials/CredentialsPanel";
 import { ArtworkSettingsPanel } from "./ArtworkSettingsPanel";
 import { ProvidersPanel } from "./ProvidersPanel";
 import { CreditsPanel } from "./CreditsPanel";
+import { useSystemInfo } from "./useSystemInfo";
+import { BackupPanel } from "./BackupPanel";
+import { LanguageSettingsRow } from "./LanguageSettingsRow";
+import { TimezoneSettingsRow } from "./TimezoneSettingsRow";
+import { memoryGiB, softwareVersion, uptimeParts } from "./system-info";
 import type { DomainIconResolver } from "../../core/domain-icons";
 import { settingsGroupDedicatedViewLabel } from "./settings-group-affordances";
 import { readSessionScope } from "../../runtime/session-scope";
@@ -672,11 +677,56 @@ function AboutGroup({
   streamOpen
 }: GroupContentProps) {
   useLocale();
+  // The host and the installed release, read once when About is shown.
+  // The software version is the release - never the health version and
+  // never the build. A null field paints the unknown string.
+  const { info, version } = useSystemInfo();
+  const known = (v: string | null | undefined): string =>
+    v === null || v === undefined || v === "" ? t("settings.unknown") : v;
+  const cores = info?.cpuCores ?? null;
+  const memory = info?.memoryTotalBytes ?? null;
+  const uptime = info?.uptimeS ?? null;
   return (
     <>
       <dl className="settings-info">
         <dt>{t("settings.about.version")}</dt>
-        <dd>{health?.version ?? t("settings.unknown")}</dd>
+        <dd>{known(softwareVersion(version))}</dd>
+        <dt>{t("settings.about.build")}</dt>
+        <dd>{known(version?.build ?? null)}</dd>
+        <dt>{t("settings.about.bundleArch")}</dt>
+        <dd>{known(version?.architecture ?? null)}</dd>
+        <dt>{t("settings.about.builtAt")}</dt>
+        <dd>{known(version?.builtAtUtc ?? null)}</dd>
+        <dt>{t("settings.about.hostname")}</dt>
+        <dd>{known(info?.hostname ?? null)}</dd>
+        <dt>{t("settings.about.os")}</dt>
+        <dd>{known(info?.os ?? null)}</dd>
+        <dt>{t("settings.about.kernel")}</dt>
+        <dd>{known(info?.kernel ?? null)}</dd>
+        <dt>{t("settings.about.hostArch")}</dt>
+        <dd>{known(info?.architecture ?? null)}</dd>
+        <dt>{t("settings.about.model")}</dt>
+        <dd>{known(info?.model ?? null)}</dd>
+        <dt>{t("settings.about.cpuModel")}</dt>
+        <dd>{known(info?.cpuModel ?? null)}</dd>
+        <dt>{t("settings.about.cpuCores")}</dt>
+        <dd>{known(cores === null ? null : String(cores))}</dd>
+        <dt>{t("settings.about.memory")}</dt>
+        <dd>
+          {known(
+            memory === null
+              ? null
+              : t("settings.about.memoryValue", { gib: memoryGiB(memory), bytes: String(memory) })
+          )}
+        </dd>
+        <dt>{t("settings.about.uptime")}</dt>
+        <dd>
+          {known(
+            uptime === null
+              ? null
+              : t("settings.about.uptimeValue", { ...uptimeParts(uptime), s: String(uptime) })
+          )}
+        </dd>
         <dt>{t("settings.about.status")}</dt>
         <dd>{health?.status ?? t("settings.unknown")}</dd>
         <dt>{t("settings.about.updated")}</dt>
@@ -750,6 +800,7 @@ function systemStageSummary(
   if (id === "diagnostics") return diagnostics.health?.status ?? t("settings.unknown");
   if (id === "plugins") return t("settings.system.summary.lifecycle");
   if (id === "power") return t("settings.system.summary.power");
+  if (id === "backup") return t("settings.system.summary.backup");
   return t("settings.system.summary.planned");
 }
 
@@ -798,6 +849,14 @@ function SystemGroup({
         </>
       );
     }
+    if (id === "backup") {
+      return (
+        <>
+          {header}
+          <BackupPanel />
+        </>
+      );
+    }
     if (id === "power") {
       // REAL power verbs - the menu-chrome help promises power stays
       // reachable in Settings when the sidebar cluster is hidden;
@@ -842,6 +901,10 @@ function SystemGroup({
         * same lock as the stage below; kept above the rail so nav
         * stays live. */}
       <NotificationSettingsRows />
+      {/* The operator's language: language.set on system.locale, from
+        * Settings at any time - not the first-boot path. */}
+      <LanguageSettingsRow />
+      <TimezoneSettingsRow />
       {/* Pairing AND household lockdown both live on the Security tile (own
         * group) now - both are device security. System hosts neither. */}
       <nav className="audio-rail" aria-label={t("settings.system.operationsAria")}>

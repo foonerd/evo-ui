@@ -28,7 +28,7 @@ import {
   readLastNowPlaying,
   writeLastNowPlaying
 } from "./now-playing-cache";
-import type { NowPlaying } from "./now-playing-decoders";
+import type { NowPlaying, ShuffleMode } from "./now-playing-decoders";
 import { startReanchorDelayMs } from "./playback-clock";
 import type { StreamFormat } from "../audio/stream-format-decoders";
 
@@ -68,7 +68,9 @@ export interface PlaybackState {
   setVolume: (volume: number) => Promise<PlaybackVerbResult>;
   setMute: (enabled: boolean) => Promise<PlaybackVerbResult>;
   setRepeat: (enabled: boolean) => Promise<PlaybackVerbResult>;
-  setShuffle: (enabled: boolean) => Promise<PlaybackVerbResult>;
+  /** Shuffle is off, by track, or by album: one write, set_shuffle
+   *  { mode }. The glass never sends { enabled }. */
+  setShuffleMode: (mode: ShuffleMode) => Promise<PlaybackVerbResult>;
   setSingle: (enabled: boolean) => Promise<PlaybackVerbResult>;
   setConsume: (enabled: boolean) => Promise<PlaybackVerbResult>;
   refreshNowPlaying: () => Promise<PlaybackVerbResult>;
@@ -209,8 +211,8 @@ function usePlaybackController(): PlaybackState {
     (enabled: boolean) => dispatchVerb("set_repeat", { enabled }),
     [dispatchVerb]
   );
-  const setShuffle = useCallback(
-    (enabled: boolean) => dispatchVerb("set_shuffle", { enabled }),
+  const setShuffleMode = useCallback(
+    (mode: ShuffleMode) => dispatchVerb("set_shuffle", { mode }),
     [dispatchVerb]
   );
   const setSingle = useCallback(
@@ -246,7 +248,7 @@ function usePlaybackController(): PlaybackState {
     setVolume,
     setMute,
     setRepeat,
-    setShuffle,
+    setShuffleMode,
     setSingle,
     setConsume,
     refreshNowPlaying

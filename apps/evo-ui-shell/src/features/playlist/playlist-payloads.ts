@@ -26,6 +26,14 @@ export type MoveInPlaylistPayload = {
   to_position: number;
 };
 
+/** playlist.duplicate: copy `source` into a new `target`. Two names,
+ *  nothing else - no path, no overwrite; the plugin refuses an existing
+ *  target, the favourites name and the same name on both sides. */
+export type DuplicatePlaylistPayload = {
+  source: string;
+  target: string;
+};
+
 export function addToPlaylistPayload(
   name: string,
   uris: readonly string[]
@@ -46,4 +54,11 @@ export function moveInPlaylistPayload(
   toPosition: number
 ): MoveInPlaylistPayload {
   return { name, from_position: fromPosition, to_position: toPosition };
+}
+
+export function duplicatePlaylistPayload(
+  source: string,
+  target: string
+): DuplicatePlaylistPayload {
+  return { source, target };
 }

@@ -211,7 +211,10 @@ test("Library: Confirm on a USB source sends one library.remove_source and mount
   assert.ok(/const r = await library\.removeSource\(target\.id\);/.test(start), "the same verb, { source_id }");
   assert.ok(/staleRemovalRef\.current = usb\.removal;/.test(start), "the frame already on the subject is stale");
   assert.ok(/stage: null,\s*verbDone: false/.test(start), "no stage claimed at Confirm");
-  assert.ok(/if \(!r\.ok\) \{\s*setUsbRemove\(null\);\s*setBusy\(false\);\s*setFeedback\(r\.message\);/.test(start), "a refused verb paints and drops the heartbeat");
+  // Household lift (named, with the Library Remove household row): a
+  // household lock paints the household line and opens the door ahead of
+  // the message; any other refusal still paints the message.
+  assert.ok(/if \(!r\.ok\) \{\s*setUsbRemove\(null\);\s*setBusy\(false\);\s*if \(isHouseholdLocked\(r\)\) \{[\s\S]*?return;\s*\}\s*setFeedback\(r\.message\);/.test(start), "a refused verb paints and drops the heartbeat");
   assert.ok(!/usb\.(mount|repair|rename|safeRemove)\(/.test(library), "Library never calls mount / repair / rename / safe_remove");
   assert.ok(/dispatch\("library\.remove_source", \{ source_id: sourceId \}\)/.test(src("features/library/useLibrary.ts")));
 });
@@ -267,7 +270,10 @@ test("Sources: with a library id, Safe remove sends library.remove_source; safe_
   assert.ok(/staleRemovalRef\.current = usb\.removal;/.test(run));
   assert.ok(/stage: null,\s*verbDone: false/.test(run), "no stage claimed at the press");
   assert.ok(/refuse\(r, drive, "saferemove"\)/.test(run), "the one classifier");
-  assert.ok(/subclass: null/.test(run), "the library refuse adapts to UsbVerbResult");
+  // Household lift (named, with the Library Remove household row): the
+  // adapter keeps the library subclass, so a household lock is the
+  // household branch of the one classifier, never Force.
+  assert.ok(/subclass: lr\.subclass \?\? null/.test(run), "the library refuse adapts to UsbVerbResult");
   assert.ok(/onClick=\{\(\) => void runSafeRemove\(drive\)\}/.test(sources));
   assert.ok(/void runSafeRemove\(d, true\);/.test(sources), "Force confirm still runSafeRemove(d, true)");
   assert.ok(

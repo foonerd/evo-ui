@@ -3,13 +3,11 @@ import { GatewayClient } from "../../core/gateway-client";
 import type {
   MaintenanceStatePayload,
   PluginsPayload,
-  SshStatusPayload,
-  UpdateStatusPayload
+  SshStatusPayload
 } from "../../core/types";
 
 interface OperationsState {
   maintenance: MaintenanceStatePayload | null;
-  updates: UpdateStatusPayload | null;
   plugins: PluginsPayload | null;
   ssh: SshStatusPayload | null;
   loading: boolean;
@@ -18,7 +16,6 @@ interface OperationsState {
 
 const INITIAL_STATE: OperationsState = {
   maintenance: null,
-  updates: null,
   plugins: null,
   ssh: null,
   loading: false,
@@ -36,15 +33,13 @@ export function useOperationsState(client: GatewayClient) {
     setState((prev) => ({ ...prev, loading: true, error: null }));
     const run = (async () => {
       try {
-        const [maintenance, updates, plugins, ssh] = await Promise.all([
+        const [maintenance, plugins, ssh] = await Promise.all([
           client.getMaintenanceState(),
-          client.getUpdateStatus(),
           client.getPlugins(),
           client.getSshStatus()
         ]);
         setState({
           maintenance,
-          updates,
           plugins,
           ssh,
           loading: false,

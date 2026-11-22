@@ -28,7 +28,7 @@ import {
   tryUseFrameworkTransport
 } from "../../runtime/framework-transport";
 import { attachSharedHappenings } from "../../runtime/shared-framework-attach";
-import { isElevationRequired } from "../../runtime/step-up-elevation.ts";
+import { isElevationRequired, isSittingRefused } from "../../runtime/step-up-elevation.ts";
 import { WsTransport } from "../../runtime/ws-transport.ts";
 import { t } from "../../runtime/i18n";
 import {
@@ -235,7 +235,9 @@ export function useHouseholdProtection(): HouseholdProtection {
           // the error back when the operator DISMISSED the card. The change
           // did not apply (we never setSnapshot), so lend is unchanged - show
           // the honest "enter the system password" ask, never the raw 403.
-          if (isElevationRequired(r.error)) {
+          // A sent sitting refused as expired or invalid was cleared and
+          // the card raised once; dismissed, it is the same ask.
+          if (isElevationRequired(r.error) || isSittingRefused(r.error)) {
             const message = t("household.stepUpNeeded");
             setError(message);
             return { ok: false, message };

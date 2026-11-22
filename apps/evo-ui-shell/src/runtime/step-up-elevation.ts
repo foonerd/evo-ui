@@ -20,3 +20,13 @@ export function isElevationRequired(error: WireOpError | undefined): boolean {
   if (error === undefined) return false;
   return error.subclass === "step_up_required";
 }
+
+// A sitting that rode the send and was refused by the framework's own
+// validation: step_up_expired (past its expires_at_ms) or step_up_invalid
+// (unknown - revoked, reaped, a steward restart). It is dead. This is not
+// the card predicate on its own: dispatchWithStepUp clears the sitting and
+// raises the card once ONLY when the cached sitting rode that send.
+export function isSittingRefused(error: WireOpError | undefined): boolean {
+  if (error === undefined) return false;
+  return error.subclass === "step_up_expired" || error.subclass === "step_up_invalid";
+}

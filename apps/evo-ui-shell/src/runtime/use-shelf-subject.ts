@@ -11,8 +11,12 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { MutableRef } from "preact/hooks";
 import { WsTransport } from "./ws-transport";
 import { clearBearer, onBearerChange } from "./bearer";
-import { resolveConnectFailure, resolveProbeRead } from "./stale-bearer-policy";
-import { probeStaleBearer } from "./stale-bearer-probe";
+import {
+  resolveBearerRecheck,
+  resolveConnectFailure,
+  resolveProbeRead
+} from "./stale-bearer-policy";
+import { bearerUpgradeLands, probeStaleBearer } from "./stale-bearer-probe";
 import { pluginRequest } from "./plugin-request-codec";
 import { connectWithRetry, MAX_CONNECT_ATTEMPTS } from "./connect-retry";
 import { verbErrorMessage } from "./verb-error";
@@ -307,7 +311,8 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
             });
             return r.error === undefined;
           },
-          isCancelled: () => cancelled
+          isCancelled: () => cancelled,
+          bearer: readBearer
         });
         if (cancelled) return;
         if (outcome === "backout") {
@@ -345,14 +350,28 @@ export function useShelfSubject<S>(config: ShelfSubjectConfig<S>): ShelfSubject<
           readLanded
         });
         if (probeRead === "purge") {
-          // The anonymous read landed where the bearer socket was
-          // refused: the stored token is dead (device reset / revoked /
-          // expired), not the device. Purge it - the surface drops to
-          // its unpaired "pair to manage" state with this live read-only
-          // content, no incognito / site-data clearing. clearBearer()
-          // announces the purge on the bearer bus, which re-mounts this
-          // shelf on the shared LAN-trust socket; the anonymous probe
-          // socket keeps serving until that re-mount lands.
+          // The anonymous read landed where the bearer socket failed.
+          // That failure may have been the outage (a reboot, a steward
+          // restart): this probe retried until the device answered. So
+          // re-handshake the stored bearer once, now. If it upgrades, the
+          // token is live - keep it and re-mount on the bearer socket.
+          const recheck = resolveBearerRecheck(
+            await bearerUpgradeLands(frameworkUrl(), readBearer())
+          );
+          if (cancelled) return;
+          if (recheck === "keep-bearer-live") {
+            forceAnonRef.current = false;
+            setReauthNonce((n) => n + 1);
+            return;
+          }
+          // Refused while the anonymous upgrade succeeded: the stored
+          // token is dead (device reset / revoked / expired), not the
+          // device. Purge it - the surface drops to its unpaired "pair to
+          // manage" state with this live read-only content, no incognito
+          // / site-data clearing. clearBearer() announces the purge on
+          // the bearer bus, which re-mounts this shelf on the shared
+          // LAN-trust socket; the anonymous probe socket keeps serving
+          // until that re-mount lands.
           clearBearer();
           bearerRef.current = undefined;
           forceAnonRef.current = false;

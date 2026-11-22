@@ -33,6 +33,7 @@ import {
 import type { TextOverflowMode } from "../../components/ScrollingText";
 import { t } from "../../runtime/i18n";
 import { useLocale } from "../../runtime/use-locale";
+import { artworkSrc } from "../library/artwork-src";
 
 type CollectionViewMode = "list" | "tile";
 
@@ -328,7 +329,7 @@ export function FavouritesSurface({
                 title={item.title ?? item.uri}
                 artist={item.artist}
                 album={item.album}
-                artworkUrl={item.artworkUrl}
+                artworkUrl={artworkSrc(item.artworkHash, item.artworkUrl)}
                 placeholderIcon={<Heart size={16} />}
                 classical={showClassicalStrip ? item.classical : null}
                 durationMs={item.durationMs}

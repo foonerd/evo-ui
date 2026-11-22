@@ -5,6 +5,7 @@ import {
   type TransportState
 } from "./now-playing-decoders";
 import { elapsedAnchorOf } from "./playback-clock";
+import { nextShuffleMode, paintedShuffleMode } from "./shuffle-mode";
 import {
   Heart,
   ListPlus,
@@ -131,7 +132,7 @@ export function PlaybackSurface({
     setVolume,
     setMute,
     setRepeat,
-    setShuffle,
+    setShuffleMode,
     refreshNowPlaying
   } = usePlayback();
   // Tracks whether a verb dispatch is in flight so transport
@@ -206,7 +207,27 @@ export function PlaybackSurface({
   const volume = nowPlaying?.volume ?? 0;
   const durationMs = nowPlaying?.durationMs ?? null;
   const isPlaying = transportState === "playing";
-  const shuffleOn = nowPlaying?.shuffle ?? false;
+  // Shuffle is a mode the player reports; MPD's random flag alone can
+  // only prove track shuffle. null = not reported: nothing is painted on.
+  const shuffleMode = paintedShuffleMode(nowPlaying);
+  const shuffleOn =
+    shuffleMode === "tracks" || shuffleMode === "albums" || shuffleMode === "similar";
+  const shuffleBadge =
+    shuffleMode === "albums"
+      ? t("stage.shuffleAlbumsBadge")
+      : shuffleMode === "similar"
+        ? t("stage.shuffleSimilarBadge")
+        : null;
+  const shuffleLabel =
+    shuffleMode === "albums"
+      ? t("stage.shuffleAlbums")
+      : shuffleMode === "similar"
+        ? t("stage.shuffleSimilar")
+      : shuffleMode === "tracks"
+        ? t("stage.shuffleTracks")
+        : shuffleMode === "off"
+          ? t("stage.shuffleOff")
+          : t("stage.shuffle");
   const repeatOn = nowPlaying?.repeat ?? false;
 
   // The warden publishes now_playing only on transitions - play /
@@ -579,10 +600,13 @@ export function PlaybackSurface({
           }
           disabled={busy}
           aria-pressed={shuffleOn}
-          onClick={() => void runVerb(() => setShuffle(!shuffleOn))}
-          aria-label="Shuffle"
+          data-shuffle-mode={shuffleMode ?? "unreported"}
+          onClick={() => void runVerb(() => setShuffleMode(nextShuffleMode(shuffleMode)))}
+          aria-label={shuffleLabel}
+          title={shuffleLabel}
         >
           <Shuffle size={iconStd} />
+          {shuffleBadge !== null ? <span className="playback-transport-badge">{shuffleBadge}</span> : null}
         </button>
         ) : null}
         <button
